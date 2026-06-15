@@ -11,3 +11,7 @@ Desktop.ini
 !.env.example
 node_modules/
 .og-frames/
+
+# local DevTools perf captures
+Trace-*.json/
+Trace-*.json

@@ -11,7 +11,8 @@ const dir = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(join(dir, "..", "public", "index.html"), "utf8");
 let body = html.match(/<script>\s*"use strict";([\s\S]*?)<\/script>/)[1];
 // expose lexically-scoped state for assertions (consts aren't global props in strict mode)
-body += '\n;globalThis.__probe = ()=>({count, cam, MAXINK});';
+body += '\n;globalThis.__probe = ()=>({count, cam, MAXINK, beat, glyphCacheSize: glyphCache.size});';
+body += '\n;globalThis.__lutSin = lutSin;';
 
 let assertions = 0, fails = 0;
 function ok(cond, msg){ assertions++; if(!cond){ fails++; console.error("FAIL:", msg); } }
@@ -56,6 +57,19 @@ try {
 // drive frames; move the mouse so ink is shed
 function fireMove(x,y){ (listeners.mousemove||[]).forEach(f=>f({clientX:x,clientY:y})); }
 function fireWheel(x,y,dy){ (listeners.wheel||[]).forEach(f=>f({clientX:x,clientY:y,deltaY:dy,ctrlKey:false,preventDefault(){}})); }
+function fireClick(){ (listeners.click||[]).forEach(f=>f({})); }
+
+// sin LUT must approximate Math.sin across the range the pulse uses (phase ≥ 0,
+// up to a few hundred radians). 256 entries → max error ~2π/256/2 ≈ 0.012 rad.
+{ let maxErr=0;
+  for(let x=0; x<200; x+=0.137){ const e=Math.abs(sandbox.__lutSin(x)-Math.sin(x)); if(e>maxErr)maxErr=e; }
+  ok(maxErr<0.03, `lutSin within tolerance of Math.sin (maxErr=${maxErr.toFixed(4)})`);
+}
+
+// prewarm should have populated the glyph cache with every beat voice at boot,
+// BEFORE any click — this is the fix for the click-lag (no cold getImageData on
+// click). There are 8 distinct beat voices; one cache entry per line.
+ok(sandbox.__probe().glyphCacheSize>=8, `voices prewarmed at boot (cache=${sandbox.__probe().glyphCacheSize})`);
 
 let maxCount=0;
 for(let frame=0; frame<600; frame++){
@@ -63,6 +77,7 @@ for(let frame=0; frame<600; frame++){
   // a wandering hand
   fireMove(640+Math.sin(frame*0.13)*300, 360+Math.cos(frame*0.11)*200);
   if(frame===200) fireWheel(640,360,-600);   // zoom in
+  if(frame===300) fireClick();               // advance a beat — must not stall/crash
   if(frame===400) fireWheel(640,360, 600);   // zoom back out
   if(rafCb){ const cb=rafCb; rafCb=null; cb(nowMs); }
   const st = sandbox.__probe();
@@ -71,6 +86,7 @@ for(let frame=0; frame<600; frame++){
   ok(Number.isFinite(st.cam.zoom) && st.cam.zoom>0, "zoom finite/positive");
 }
 const fin = sandbox.__probe();
+ok(fin.beat===1, `click advanced the beat (beat=${fin.beat})`);
 ok(maxCount>50, `ink was shed (max count ${maxCount})`);
 ok(fin.cam.zoom>0.3 && fin.cam.zoom<7, `zoom in range after wheel (${fin.cam.zoom.toFixed(2)})`);
 

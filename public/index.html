@@ -258,6 +258,9 @@ const txt_=new Float32Array(MAXINK);            // text-hold value (0 = pure ink
 const txtInit_=new Uint8Array(MAXINK);          // is this a text particle?
 const hx_=new Float32Array(MAXINK), hy_=new Float32Array(MAXINK);   // glyph home
 const mass_=new Float32Array(MAXINK);
+// cached last field sample per particle, for temporal staggering: old/settled
+// ink only re-samples the field every other frame and reuses this between.
+const ofx_=new Float32Array(MAXINK), ofy_=new Float32Array(MAXINK);
 // expose a tiny shim so the OG/test tooling and any reader can see the count
 const ink = { get length(){ return count; } };
 
@@ -265,6 +268,20 @@ const RAND_SIZE = 2048;
 const randTable = new Float32Array(RAND_SIZE);
 for(let i=0; i<RAND_SIZE; i++) randTable[i] = Math.random() - 0.5;
 let randIdx = 0;
+
+// Sin LUT — the render pulse (drawInk) calls Math.sin per particle per frame
+// (~720k/sec). A 256-entry table indexed by phase*(256/2π) & 255 removes the
+// transcendental entirely. SIN_SCALE maps radians → table index; the &255 wrap
+// makes it periodic for free. Quality loss is imperceptible (the pulse is a ±15%
+// shimmer). Same trick as randTable, applied to trig.
+const SIN_SIZE = 256, SIN_MASK = 255;
+const SIN_SCALE = SIN_SIZE/(Math.PI*2);
+const sinTable = new Float32Array(SIN_SIZE);
+for(let i=0;i<SIN_SIZE;i++) sinTable[i]=Math.sin(i/SIN_SCALE);
+// lutSin(radians): wrap to a table index. (x*SCALE) can be negative, so &MASK
+// after a |0 — JS bitwise wraps two's-complement, and seeds/phase are ≥0 here
+// anyway, so the index is always in range.
+function lutSin(x){ return sinTable[(x*SIN_SCALE)&SIN_MASK]; }
 
 function shed(x,y, n, vx, vy){
   for(let i=0;i<n;i++){
@@ -280,6 +297,7 @@ function shed(x,y, n, vx, vy){
     age_[k]=0; invLife_[k]=1/life; mass_[k]=mass; invMass_[k]=1/mass;
     grip_[k]=0.10/Math.sqrt(mass); seed_[k]=Math.random()*6.283;
     f_[k]=0; txt_[k]=0; txtInit_[k]=0; hx_[k]=0; hy_[k]=0;
+    ofx_[k]=0; ofy_[k]=0;   // no cached field until first sample
   }
 }
 // text-ink: born at its glyph position, held there (legible), released to the
@@ -291,14 +309,27 @@ function spawnTextInk(hx,hy,life){
   x_[k]=hx+jx; y_[k]=hy+jy; px_[k]=hx; py_[k]=hy; vx_[k]=0; vy_[k]=0;
   age_[k]=0; invLife_[k]=1/life; mass_[k]=1; invMass_[k]=1; grip_[k]=0.10;
   seed_[k]=Math.random()*6.283; f_[k]=0; txt_[k]=1; txtInit_[k]=1; hx_[k]=hx; hy_[k]=hy;
+  ofx_[k]=0; ofy_[k]=0;
 }
+let stepTick=0;   // advances once per stepInk call (NOT per frame — stepInk runs ≤3×/frame)
 function stepInk(dt){
   const sub=dt*0.06;
   const n=count;
+  const parity=stepTick++&1;
   for(let k=0;k<n;k++){
     const age=age_[k]+dt; age_[k]=age;
     const f=age*invLife_[k];
-    sampleField(x_[k],y_[k]);         // writes ofx/ofy
+    // Temporal field-sampling stagger: settled ink (text-free AND past its crisp
+    // youth) re-samples the field only on its parity step and reuses the cached
+    // vector between. Young/thrown ink and text ink always sample, so the
+    // responsive "matter" feel is untouched — the saving comes from the old
+    // drifting majority where a one-step-stale weather vector is invisible.
+    if(txtInit_[k] || age<1200 || (k&1)===parity){
+      sampleField(x_[k],y_[k]);       // writes ofx/ofy
+      ofx_[k]=ofx; ofy_[k]=ofy;        // cache for the skipped steps
+    } else {
+      ofx=ofx_[k]; ofy=ofy_[k];        // reuse last good sample
+    }
     const grip=grip_[k];
     if(txtInit_[k]){
       const txt = Math.max(0, Math.min(1, (0.75 - f) / 0.35)); txt_[k]=txt;
@@ -346,6 +377,7 @@ function stepInk(dt){
         age_[w]=age_[k]; invLife_[w]=invLife_[k]; invMass_[w]=invMass_[k]; grip_[w]=grip_[k];
         seed_[w]=seed_[k]; f_[w]=f_[k]; txt_[w]=txt_[k]; txtInit_[w]=txtInit_[k];
         hx_[w]=hx_[k]; hy_[w]=hy_[k]; mass_[w]=mass_[k];
+        ofx_[w]=ofx_[k]; ofy_[w]=ofy_[k];
       }
       w++;
     }
@@ -399,22 +431,38 @@ function setBeat(i){
    plateau feel inhabited even when you hold still. `t`/`life` ramp strength in
    and out so nothing pops; some roam; some leave a word in the negative space. */
 const events = [];
+// Words the WORLD says when an event passes — a different register from the deck
+// (§voice): no quotes, lowercase, image-led, the motion itself named rather than
+// a philosophy quoted. Each event kind draws from its own pool so the same swirl
+// doesn't always announce itself the same way. Some draws return null → the event
+// passes wordlessly, which keeps the voice rare. sayNow() still de-dups (45s), so
+// even a repeated pick within the window simply stays silent.
+const pick = a => a[(Math.random()*a.length)|0];
+const EVENT_WORDS = {
+  swirl: ["something passes through", "a turning, and gone", "the white folds once",
+          "a current finds you", "it circles, then leaves", null, null],
+  gust:  ["a breath of weather", "the air leans", "something exhales", null, null, null],
+  sink:  ["a quiet swallowing", "the centre gives way", "a hollow opens", "down, and held",
+          "it draws inward", null, null],
+  pulse: ["a heartbeat, far off", "the world flinches", "out, then back", "something insists",
+          null, null, null],
+};
 function spawnEvent(){
   const kinds=[
-    // a passing swirl that drifts across — "something passes through"
+    // a passing swirl that drifts across
     ()=>({A:0, B:7000, r2:22500, x:vw(Math.random()), y:vh(Math.random()),
           vx:(Math.random()-0.5)*0.5, vy:(Math.random()-0.5)*0.5, life:9000,
-          word:"something passes through"}),
-    // a brief gust from one edge — "a breath of weather"
+          word:pick(EVENT_WORDS.swirl)}),
+    // a brief gust from one edge
     ()=>{ const ang=Math.random()*6.283;
           return {gust:true, phase:ang, peak:34, x:vw(0.5), y:vh(0.5), r2:1e8,
-                  vx:0, vy:0, life:4200, word:null}; },
-    // a sink that opens, drains, and closes — "a quiet swallowing"
+                  vx:0, vy:0, life:4200, word:pick(EVENT_WORDS.gust)}; },
+    // a sink that opens, drains, and closes
     ()=>({A:-10000, B:10000, r2:28900, x:vw(0.2+Math.random()*0.6), y:vh(0.2+Math.random()*0.6),
-          vx:0, vy:0, life:7000, word:"a quiet swallowing"}),
+          vx:0, vy:0, life:7000, word:pick(EVENT_WORDS.sink)}),
     // a heartbeat: a pulse that pushes out, then pulls in
     ()=>({pulse:true, peak:-14000, r2:40000, x:vw(0.3+Math.random()*0.4), y:vh(0.3+Math.random()*0.4),
-          vx:0, vy:0, life:6000, word:null}),
+          vx:0, vy:0, life:6000, word:pick(EVENT_WORDS.pulse)}),
   ];
   const e=kinds[(Math.random()*kinds.length)|0]();
   e.t=0; e.strength=0; e.phase=e.phase||0;
@@ -718,19 +766,43 @@ function speak(text, now){
   jitterSeed+=1.7;
 }
 function spawnLifeFor(){ return 16000; }
-function sayNow(text){ spoken.set(text, performance.now()); speak(text, performance.now()); }
+// Pre-rasterise every beat voice into the glyph cache at startup, so the first
+// CLICK on a beat never pays the synchronous getImageData readback (the costliest
+// op here, and the cause of the click hitch). Run once after resize() so fontPx
+// matches W. Beat lines are few (9) and the cache holds 64, so they never evict.
+function prewarmVoices(){
+  const fontPx=Math.max(14, Math.min(20, W*0.015));
+  for(let i=0;i<beats.length;i++){ if(beats[i].voice) glyphPoints(beats[i].voice, fontPx); }
+}
+// say a specific line NOW (beat entry, event word), but still honour the
+// no-repeat window: if this exact line spoke within NO_REPEAT_MS, stay silent
+// rather than parroting it. Event words in particular recur often (only a few
+// distinct ones), and without this guard they were the main source of repeats.
+function sayNow(text){
+  if(!text) return;
+  const now=performance.now();
+  const last=spoken.get(text);
+  if(last!==undefined && now-last < SAYNOW_REPEAT_MS) return;
+  spoken.set(text, now); speak(text, now);
+}
 // no line repeats inside this window — the deck feels deep, never loops audibly
 const NO_REPEAT_MS = 12*60*1000;     // ~12 minutes
+// sayNow lines (event words / beat voices) are fewer and fired by the world, so
+// a shorter window: long enough to kill back-to-back echoes, short enough that a
+// returning beat or recurring event can still speak once you've moved on.
+const SAYNOW_REPEAT_MS = 45*1000;    // 45 seconds
 const QUIET_AFTER  = 9000;           // dwell in silence after a line resolves
 const spoken = new Map();            // text → last-spoken timestamp
 function advanceVoice(now){
   if(now-lastAdvance < 12000) return;          // base cadence: rarer than before
   if(now < voiceBusyUntil + QUIET_AFTER) return;  // let the white breathe after a line
   if(Math.hypot(dot.vx,dot.vy)>9) return;      // wait for a quiet beat
-  // walk the deck for the next line not spoken within the no-repeat window
+  // walk the deck for the next line not spoken within the no-repeat window.
+  // Wrap the index with a plain modulo — DON'T reshuffle mid-walk, or `tries`
+  // stops corresponding to distinct positions and some lines get checked twice
+  // while others are skipped, which let recent lines slip through.
   for(let tries=0; tries<script.length; tries++){
-    si++;
-    if(si>=script.length){ shuffle(script); si=0; }
+    si=(si+1)%script.length;
     const line=script[si];
     const last=spoken.get(line);
     if(last===undefined || now-last > NO_REPEAT_MS){
@@ -739,7 +811,9 @@ function advanceVoice(now){
       return;
     }
   }
-  // every line spoken recently — stay silent this round
+  // every line spoken recently — stay silent this round. Reshuffle here (after a
+  // full clean pass) so the next deep cycle reorders without breaking the walk.
+  shuffle(script);
 }
 
 /* ---- render ---- */
@@ -789,7 +863,7 @@ function drawInk(){
       a=(1-f)*0.55;
       w=mass_[i]*1.3*(1-f*0.7);
     }
-    a*=0.85+0.15*Math.sin(pulseBase+seed_[i]);
+    a*=0.85+0.15*lutSin(pulseBase+seed_[i]);   // LUT: no per-particle trig
     if(a<0.012) continue;
     let ab=(a*INV_AMAX_AB)|0; if(ab>=AB)ab=AB-1; if(ab<0)ab=0;
     let wb=Math.round(w-0.6); if(wb>=WB)wb=WB-1; if(wb<0)wb=0;
@@ -874,7 +948,7 @@ function frame(now){
   ctx.setTransform(z,0,0,z, -cam.x*z, -cam.y*z);
   drawInk();
   drawDot();
-  requestAnimationFrame(frame);
+  if(benchDone) requestAnimationFrame(frame);   // during ?bench, the harness re-arms instead
 }
 let INK='#111';
 
@@ -906,8 +980,48 @@ cv.addEventListener('click',nextBeat);
 // the one DOM control: invert button (mirrors the Space key)
 document.getElementById('uiTheme').addEventListener('click',(e)=>{ toggleTheme(); e.stopPropagation(); });
 
+/* ---- startup benchmark (profiler-free) ----
+   Append ?bench to the URL to measure real first-paint cost WITHOUT a DevTools
+   profiler attached — the profiler's own ~130ms StartProfiling welds onto frame 0
+   and hides the true number, so a trace can't see this. We time each init phase,
+   then the first 120 frame() durations, and log a summary. The frame loop's own
+   rAF (`benchDone` short-circuits it) is suppressed during the measured window so
+   we drive it ourselves; after 120 frames we hand back to the normal self-arming
+   loop. Entirely inert when ?bench is absent. */
+const BENCH = typeof location!=='undefined' && location.search.includes('bench');
+let benchDone = !BENCH;          // when false, frame() skips its own requestAnimationFrame
+const benchFrames = [];
+function fmt(n){ return n.toFixed(2); }
+function runBench(){
+  const t = () => performance.now();
+  const phases = {};
+  let m=t();
+  buildBatches();  phases.buildBatches = t()-m; m=t();
+  resize();        phases.resize       = t()-m; m=t();
+  prewarmVoices(); phases.prewarmVoices= t()-m; m=t();   // 9× getImageData, up front
+  placeDot();      phases.placeDot     = t()-m; m=t();
+  setBeat(0);      phases.setBeat      = t()-m;   // now a cache hit thanks to prewarm
+  console.log('%c[bench] init phases (ms)', 'font-weight:bold');
+  console.table(Object.fromEntries(Object.entries(phases).map(([k,v])=>[k,+fmt(v)])));
+
+  function step(now){
+    const a=performance.now();
+    frame(now);                       // does NOT re-arm rAF while benchDone===false
+    benchFrames.push(performance.now()-a);
+    if(benchFrames.length<120){ requestAnimationFrame(step); return; }
+    // done: report, then release the normal loop
+    const xs=benchFrames.slice().sort((p,q)=>p-q);
+    const mean=benchFrames.reduce((s,x)=>s+x,0)/benchFrames.length;
+    console.log(`[bench] frame 0: ${fmt(benchFrames[0])}ms · frame 1: ${fmt(benchFrames[1])}ms · frame 2: ${fmt(benchFrames[2])}ms`);
+    console.log(`[bench] 120 frames — median ${fmt(xs[60])}ms · p95 ${fmt(xs[114])}ms · max ${fmt(xs[119])}ms · mean ${fmt(mean)}ms · frames>16.7ms: ${benchFrames.filter(x=>x>16.7).length}`);
+    benchDone=true; requestAnimationFrame(frame);   // resume the real self-arming loop
+  }
+  requestAnimationFrame(step);
+}
+
 /* ---- go ---- */
-buildBatches(); resize(); placeDot(); setBeat(0); requestAnimationFrame(frame);
+if(BENCH) runBench();
+else { buildBatches(); resize(); prewarmVoices(); placeDot(); setBeat(0); requestAnimationFrame(frame); }
 </script>
 </body>
 </html>

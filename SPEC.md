@@ -188,6 +188,10 @@ A running record of significant architectural decisions made during development.
 - **3× rasterisation scale.** Glyph canvas rendered at 3× font size, sampled at 3-pixel step, coordinates divided back by 3. Gives sub-pixel glyph fidelity without inflating particle counts. Canvas height is `2.0×` font size (up from `1.6×`) to prevent ascender/descender clipping.
 - **Deferred spawn queue.** `speak()` stores `g.pts` in a queue; `drainSpawnQueue()` births 360 particles/frame across ~8–10 frames. Eliminates the `getImageData` + bulk-spawn spike that previously stalled a frame by 30–50ms.
 
+### Startup & input latency
+- **Click-lag fix — voice pre-warm** *(2026-06-15)*. Clicking advances a beat → `setBeat` → `speak` → `glyphPoints`, which on a *cold* line runs a synchronous `getImageData` readback (the costliest single op in the file). The first click on each beat paid that stall inline in the input handler. **Fix:** `prewarmVoices()` rasterises all 8 beat voices into the glyph cache once at boot (after `resize()`, so `fontPx` is correct), so every beat-click is a cache hit. The 8 entries never evict (cache bound is 64). Verified headlessly: `test/boot.mjs` asserts the cache holds ≥8 before any click fires, and that a click advances the beat without throwing.
+- **Profiler-free startup benchmark.** Appending `?bench` to the URL times each init phase (`buildBatches`, `resize`, `prewarmVoices`, `placeDot`, `setBeat`) and the first 120 frame durations, logging a table to the console, then hands back to the normal loop. This exists because a DevTools trace **can't** measure true first-frame cost: `CpuProfiler::StartProfiling` (~130ms) welds onto frame 0 and dominates it. A 614s production trace confirmed this — the headline 144ms "first frame" was ~130ms profiler attach; the rest of the session had only 4 frames over 16.7ms. The bench harness is inert without `?bench`.
+
 ### Rendering
 - **Zero per-frame allocation.** `Path2D` objects replaced by pre-allocated `Float32Array` coordinate buffers (`bCoords[18]`, each `MAXINK×4` floats). Frame loop writes `x0,y0,x1,y1` per particle, then strokes each non-empty bucket with `beginPath()` / `moveTo/lineTo` loop / `stroke()`. GC never touches the render path.
 - **`bCount` typed array.** An `Int32Array(18)` reset with `.fill(0)` each frame. Faster than clearing object arrays.
@@ -195,6 +199,9 @@ A running record of significant architectural decisions made during development.
 ### Voice
 - **Fisher-Yates shuffle.** Applied at startup; reapplied when the deck is exhausted. The world never goes silent.
 - **`advanceVoice` loops.** Removed the `si >= script.length − 1` early return; replaced with `si=0; shuffle(script)` on overflow.
+- **Repeat suppression has two paths, both now guarded** *(2026-06-15)*:
+  - *Deck path* (`advanceVoice`): walks the shuffled script for the next line not spoken within `NO_REPEAT_MS` (12 min). The walk now wraps the index with a plain modulo and reshuffles **only after** a full clean pass — previously it reshuffled *mid-walk*, which desynced the `tries` counter from distinct positions and let recently-spoken lines slip through.
+  - *Direct path* (`sayNow`, used by beat entries and event words): previously bypassed the window entirely and called `speak()` unconditionally. Because there were only **two** distinct event words (`"something passes through"`, `"a quiet swallowing"`) and an event fires every 7–16s, this was the dominant source of audible repeats. Two fixes: (a) `sayNow` now honours a shorter `SAYNOW_REPEAT_MS` (45 s) window — long enough to kill back-to-back echoes, short enough that a returning beat can still speak; (b) the **event-word pool was widened** — an `EVENT_WORDS` table gives each of the four event kinds (swirl, gust, sink, pulse) its own list of 4–5 image-led phrases plus `null` entries, so an event may also pass *wordlessly*. The two formerly-silent kinds (gust, pulse) can now speak. A consequence: an event whose drawn word is still in cooldown fires silently, which is intended.
 
 ---
 
@@ -213,6 +220,8 @@ Currently the world is a single canvas; state resets on reload. **Direction:** a
 
 ### 9.4 Offscreen ink canvas
 Long-lived trails (up to 20s) mean thousands of particles must be simulated and rendered continuously. **Direction:** particles that have fully settled (velocity below a threshold, age above a threshold) can be *baked* onto an offscreen canvas and retired from the live array. The baked canvas is composited under the live pass. This caps the live particle count regardless of how long the session runs and would unlock much longer plateau persistence without cost.
+
+> **Status (2026-06-15):** *not yet needed.* A CPU profile of the live deployment (91s capture) showed **~70% idle**, with the heaviest JS being `drawInk` (3.3%) and `noise2` (3.2%); GC was negligible (0.2%). At the current particle cap and trail lifespan there is no frame pressure to relieve. This stays a *future* unlock that becomes relevant only when plateaus persist for minutes rather than seconds (Movement III, §9.3). Don't build it speculatively.
 
 ### 9.5 Sound as a second field
 The spec calls for near-silence: one soft tone per being-refrain, the Dot's tone a held low note. **Direction:** use the Web Audio API to generate a small number of sine oscillators whose pitch, tremolo rate, and gain are driven by field quantities — the magnitude of the curl-noise at the dot's position, the number of live sources, the proximity of beings. The sound should be physically continuous with the image: not music layered on top, but the field heard rather than seen. Off by default.
