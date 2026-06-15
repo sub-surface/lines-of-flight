@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lines of Flight — about</title>
+<meta name="description" content="A dot that stays, a line that leaves. A minimal, meditative canvas piece, worn in the philosophy of Deleuze.">
+<style>
+  /* The same world, paused. Paper-white, ink, a warm serif — the palette of
+     the game itself (§6). Space inverts, exactly as it does in the canvas. */
+  :root{
+    --paper:#FAFAF8; --ink:#111; --grey:#3A3A38; --faint:#8c8c88;
+    --rule:rgba(17,17,17,.12);
+    --serif:Georgia,"EB Garamond","Times New Roman",serif;
+  }
+  html.dark{
+    --paper:#0f1012; --ink:#eeeeec; --grey:#cfcfca; --faint:#6f6f6b;
+    --rule:rgba(238,238,236,.14);
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;}
+  body{
+    background:var(--paper); color:var(--grey);
+    font:400 18px/1.75 var(--serif);
+    transition:background .8s ease,color .8s ease;
+    -webkit-font-smoothing:antialiased;
+  }
+  /* a faint living-ink wash behind the words, so the page still breathes */
+  #weather{position:fixed; inset:0; z-index:0; pointer-events:none; opacity:.5;}
+
+  main{position:relative; z-index:1; max-width:680px; margin:0 auto;
+       padding:14vh 28px 22vh;}
+
+  /* the lone whisper of chrome, mirrored from the game: a corner mark that
+     reveals invert / play / home on hover. mix-blend keeps it legible on both
+     worlds. */
+  #ui{position:fixed; top:0; right:0; padding:14px 16px; z-index:10;
+      font:400 13px/1.5 var(--serif); color:#888; mix-blend-mode:difference;
+      text-align:right;}
+  #ui .mark{display:inline-block; width:7px; height:7px; border-radius:50%;
+      background:#888; opacity:.5; transition:opacity .4s ease; vertical-align:middle;}
+  #ui:hover .mark{opacity:0;}
+  #ui .panel{max-height:0; overflow:hidden; opacity:0; pointer-events:none;
+      transition:max-height .5s ease,opacity .5s ease; margin-top:2px;}
+  #ui:hover .panel{max-height:200px; opacity:1; pointer-events:auto;}
+  #ui .panel a,#ui .panel button{display:block; color:#888; background:none;
+      border:0; padding:3px 0; margin:0 0 0 auto; font:inherit; text-decoration:none;
+      cursor:pointer; opacity:.75; transition:opacity .25s ease; text-align:right;}
+  #ui .panel a:hover,#ui .panel button:hover{opacity:1;}
+
+  h1{font-weight:400; font-size:clamp(34px,7vw,52px); line-height:1.1;
+     color:var(--ink); letter-spacing:.01em; margin:0 0 .1em;}
+  .sub{color:var(--faint); font-style:italic; font-size:19px; margin:0 0 2.6em;}
+
+  .epi{margin:0 0 3em; padding:0; border:0;}
+  .epi p{font-style:italic; font-size:21px; line-height:1.6; color:var(--ink);
+         margin:0 0 .4em;}
+  .epi cite{display:block; font-style:normal; font-size:14px; color:var(--faint);
+            letter-spacing:.04em;}
+
+  h2{font-weight:400; color:var(--ink); font-size:14px; letter-spacing:.22em;
+     text-transform:uppercase; margin:3.2em 0 1em;
+     padding-bottom:.6em; border-bottom:1px solid var(--rule);}
+  p{margin:0 0 1.2em;}
+  strong{color:var(--ink); font-weight:400; font-style:italic;}
+  a.link{color:var(--ink); text-decoration:none;
+          border-bottom:1px solid var(--rule);}
+  a.link:hover{border-bottom-color:var(--ink);}
+
+  /* the two beings, set as a quiet definition pair */
+  .beings{display:grid; gap:1.4em; margin:1em 0 0;}
+  .being{display:grid; grid-template-columns:auto 1fr; gap:1em; align-items:baseline;}
+  .being .name{color:var(--ink); font-style:italic; white-space:nowrap;}
+  .being .gloss{color:var(--grey); font-size:16px; line-height:1.6;}
+
+  /* how to play — keys as small caps marks */
+  .keys{list-style:none; padding:0; margin:1em 0 0;}
+  .keys li{display:grid; grid-template-columns:7.5em 1fr; gap:1em;
+           padding:.55em 0; border-bottom:1px solid var(--rule); font-size:16px;}
+  .keys li:last-child{border-bottom:0;}
+  .keys kbd{font:inherit; color:var(--ink); font-style:italic;}
+
+  .colophon{margin-top:3.4em; font-size:14px; line-height:1.8; color:var(--faint);}
+  .colophon a{color:var(--grey);}
+
+  .back{display:inline-block; margin-top:3em; font-style:italic; color:var(--ink);
+        text-decoration:none; border-bottom:1px solid var(--rule);}
+  .back:hover{border-bottom-color:var(--ink);}
+</style>
+</head>
+<body>
+<canvas id="weather" aria-hidden="true"></canvas>
+
+<nav id="ui" aria-label="controls">
+  <span class="mark" aria-hidden="true"></span>
+  <div class="panel">
+    <button id="uiTheme" type="button">invert</button>
+    <a href="/">play</a>
+    <a href="https://subsurfaces.net" target="_blank" rel="noopener">subsurfaces</a>
+  </div>
+</nav>
+
+<main>
+  <h1>Lines of Flight</h1>
+  <p class="sub">A dot that stays. A line that leaves.</p>
+
+  <blockquote class="epi">
+    <p>“A line of flight is not made of two points. It passes between points, it comes up through the middle.”</p>
+    <cite>— Gilles Deleuze &amp; Félix Guattari, <em>A Thousand Plateaus</em></cite>
+  </blockquote>
+
+  <p>A black dot sits in the middle of a white screen. That is the whole world,
+     at first.</p>
+
+  <p>You move, and a trail follows — not a cursor, but a <strong>living line</strong>
+     you have drawn into being. The line is not kept. It is ink-matter, carried by
+     an invisible field, that diffuses into weather and fades into white. The field
+     reveals itself only in how the ink bends.</p>
+
+  <h2>Two beings</h2>
+  <div class="beings">
+    <div class="being">
+      <span class="name">The Dot</span>
+      <span class="gloss">Stillpoint. Rooted, sedentary — the one who stays so
+        that there is a <em>here</em> at all. It cannot follow you, and knows it.
+        You cannot flee from nowhere.</span>
+    </div>
+    <div class="being">
+      <span class="name">The Line</span>
+      <span class="gloss">You, becoming. Where the Dot is a point, the Line is a
+        passage — never finished, always in the middle of something. The long
+        conversation is between staying and leaving.</span>
+    </div>
+  </div>
+
+  <h2>How to be here</h2>
+  <p>There is nothing to win and nothing to lose. Stillness is not punished; it
+     is the pause. Move slowly and watch the world breathe.</p>
+  <ul class="keys">
+    <li><kbd>move</kbd><span>shed ink — the faster you go, the more you leave</span></li>
+    <li><kbd>click</kbd><span>change the field: well, orbit, vortex, current, weather…</span></li>
+    <li><kbd>← →</kbd><span>step through the field-states by hand</span></li>
+    <li><kbd>space</kbd><span>invert — let the world cross from paper to dark</span></li>
+  </ul>
+
+  <h2>A voice in the white</h2>
+  <p>The world carries a voice — a shuffled deck of aphorisms drawn from
+     Deleuze: <em>A Thousand Plateaus</em>, <em>Difference and Repetition</em>,
+     <em>The Logic of Sense</em>, <em>What is Philosophy?</em>, and his readings
+     of Spinoza, Bergson, and Blanchot. The words do not print — they
+     <strong>precipitate</strong>, settling into the empty quarters of the screen
+     as ink held briefly to its own shape, then released to the field as weather.
+     The deck reshuffles and loops, so the world never goes silent.</p>
+
+  <h2>Worn lightly</h2>
+  <p>The philosophy is the grain of the wood, not the carving. The words
+     <em>rhizome</em>, <em>deterritorialization</em>, <em>assemblage</em> never
+     appear on screen. The ideas arrive as physics and feeling: a line of flight
+     is the ink that escapes the point it started from; smooth and striated space
+     are the open field and the ruled well; an assemblage is the moment a
+     connection makes a third thing that neither was alone.</p>
+
+  <h2>Made of</h2>
+  <p>One velocity field, evaluated once per frame onto a coarse grid and read by
+     thousands of ink-particles with mass, momentum, and age. No build step, no
+     dependencies, no backend — a single HTML file and an HTML5 canvas, served
+     from the edge. The full design and engineering notes live in the
+     <a class="link" href="/SPEC.md">spec</a>.</p>
+
+  <p class="colophon">
+    Part of the <a href="https://subsurfaces.net">Sub-Surface</a> network ·
+    <a href="https://subsurfaces.net/arcade">more small worlds in the arcade</a> ·
+    <a href="https://github.com/sub-surface/lines-of-flight">source on GitHub</a>
+  </p>
+
+  <a class="back" href="/">← back to the white</a>
+</main>
+
+<script>
+"use strict";
+/* invert, mirrored from the game — toggles a class, CSS eases the rest. */
+const root=document.documentElement;
+document.getElementById('uiTheme').addEventListener('click',()=>root.classList.toggle('dark'));
+window.addEventListener('keydown',e=>{ if(e.code==='Space'){ root.classList.toggle('dark'); e.preventDefault(); }});
+
+/* a faint, slow ink-weather behind the text — the same idea as the game's
+   field-advected particles, dialed to near-silence so it never competes with
+   reading. Drifting motes on a curl-noise field, fading in and out. */
+const cv=document.getElementById('weather'), ctx=cv.getContext('2d');
+let W,H,DPR;
+function resize(){ DPR=Math.min(2,devicePixelRatio||1); W=innerWidth; H=innerHeight;
+  cv.width=W*DPR; cv.height=H*DPR; cv.style.width=W+'px'; cv.style.height=H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0); }
+addEventListener('resize',resize); resize();
+
+function noise(x,y,t){ return Math.sin(x*0.0021+t*0.5)*Math.cos(y*0.0026-t*0.35)
+  +0.5*Math.sin((x+y)*0.0017-t*0.7); }
+const N=170, motes=[];
+for(let i=0;i<N;i++) motes.push({x:Math.random()*innerWidth,y:Math.random()*innerHeight,
+  age:Math.random()*1, life:0.0004+Math.random()*0.0006});
+let t=0, last=0;
+function frame(now){ if(!last)last=now; const dt=Math.min(50,now-last); last=now; t+=dt*0.00012;
+  ctx.clearRect(0,0,W,H);
+  const dark=root.classList.contains('dark');
+  ctx.fillStyle=dark?'rgba(238,238,236,1)':'rgba(17,17,17,1)';
+  for(const m of motes){
+    const e=2.0;
+    const vx=(noise(m.x,m.y+e,t)-noise(m.x,m.y-e,t))*26;
+    const vy=-(noise(m.x+e,m.y,t)-noise(m.x-e,m.y,t))*26;
+    m.x+=vx*dt*0.012; m.y+=vy*dt*0.012; m.age+=m.life*dt;
+    if(m.age>=1||m.x<-20||m.x>W+20||m.y<-20||m.y>H+20){
+      m.x=Math.random()*W; m.y=Math.random()*H; m.age=0; }
+    const a=Math.sin(Math.min(1,m.age)*Math.PI)*0.10;
+    if(a<0.004) continue;
+    ctx.globalAlpha=a; ctx.beginPath(); ctx.arc(m.x,m.y,0.9,0,7); ctx.fill();
+  }
+  ctx.globalAlpha=1; requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
