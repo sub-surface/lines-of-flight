@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Lines of Flight</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#FAFAF8;cursor:none;
+    -webkit-user-select:none;user-select:none;touch-action:none;}
+  canvas{display:block;position:fixed;inset:0;}
+
+  /* the one piece of chrome: a whisper in the top-right. A small mark by default;
+     the controls reveal on hover. mix-blend:difference keeps it legible on both
+     the light and the dark world without us tracking the theme in CSS. */
+  #ui{position:fixed; top:0; right:0; padding:14px 16px; z-index:10;
+      font:400 13px/1.5 Georgia,"EB Garamond","Times New Roman",serif;
+      color:#888; mix-blend-mode:difference; cursor:default;
+      text-align:right;}
+  #ui .mark{display:inline-block; width:7px; height:7px; border-radius:50%;
+      background:#888; opacity:.5; transition:opacity .4s ease; vertical-align:middle;}
+  #ui:hover .mark{opacity:0;}
+  #ui .panel{max-height:0; overflow:hidden; opacity:0; pointer-events:none;
+      transition:max-height .5s ease,opacity .5s ease; margin-top:2px;}
+  #ui:hover .panel{max-height:160px; opacity:1; pointer-events:auto;}
+  #ui .panel a, #ui .panel button{display:block; color:#888; background:none;
+      border:0; padding:3px 0; margin:0 0 0 auto; font:inherit; text-decoration:none;
+      cursor:pointer; opacity:.75; transition:opacity .25s ease; text-align:right;}
+  #ui .panel a:hover, #ui .panel button:hover{opacity:1;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<nav id="ui" aria-label="controls">
+  <span class="mark" aria-hidden="true"></span>
+  <div class="panel">
+    <button id="uiTheme" type="button">invert</button>
+    <a href="https://subsurfaces.net" target="_blank" rel="noopener">subsurfaces</a>
+    <a href="SPEC.md" target="_blank" rel="noopener">about</a>
+  </div>
+</nav>
+<script>
+"use strict";
+/* Lines of Flight — proof of soul.
+   Two beings: the Dot (Stillpoint) you carry, and the Line you shed behind it.
+   The line is not kept — it is ink-matter, advected by an invisible field,
+   that diffuses into weather and fades into white. The field reveals itself
+   only through how the ink moves. Serif text fades in/out of negative space. */
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W, H, DPR;
+function resize(){
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W*DPR; cv.height = H*DPR;
+  cv.style.width = W+'px'; cv.style.height = H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  if(typeof allocField==='function') allocField();   // field grid tracks the window
+}
+window.addEventListener('resize', resize);
+
+/* ---- theme: light paper ⇄ dark, eased so the world *breathes* between them ----
+   `mix` runs 0 (light) → 1 (dark); pressing Space eases it across. Background
+   and ink colours are interpolated from it, so a single value inverts the world. */
+const theme = {
+  mix:0, target:0,
+  bgA:[250,250,248], bgB:[15,16,18],     // paper-white ⇄ near-black
+  inkA:[17,17,17],   inkB:[238,238,236], // ink-black ⇄ ink-white
+};
+function lerp(a,b,t){ return a+(b-a)*t; }
+function rgb(A,B,t){ return 'rgb('+(lerp(A[0],B[0],t)|0)+','+(lerp(A[1],B[1],t)|0)+','+(lerp(A[2],B[2],t)|0)+')'; }
+function bgColor(){ return rgb(theme.bgA,theme.bgB,theme.mix); }
+function inkColor(){ return rgb(theme.inkA,theme.inkB,theme.mix); }
+function toggleTheme(){ theme.target = theme.target>0.5?0:1; }
+function stepTheme(dt){ theme.mix += (theme.target-theme.mix)*Math.min(1,dt*0.006); }
+
+/* ---- the Dot: Stillpoint, now carried — it locks to the cursor ----
+   The dot is the point you are; the line is what you shed behind it.
+   It eases toward the cursor so even your own position has a little weight. */
+const dot = {x:0,y:0,px:0,py:0,vx:0,vy:0};
+function placeDot(){ dot.x=dot.px=W*0.5; dot.y=dot.py=H*0.5; }
+const mouse = {x:0,y:0,inside:false};
+
+/* ---- The field: invisible forces between bodies ----
+   One velocity field sampled anywhere in the plane. It is the sum of:
+     • a slow curl-noise base (the breathing of smooth space)
+     • field-sources, each a body that warps the space around it.
+   A source's `kind` selects how it warps: attract, repel, flow, swirl, shiver.
+   These are not five mechanics but five faces of one field — and the set of
+   live sources is a STORY STATE we change at beats (see beats[] below). */
+const sources = [];   // {x,y,kind,r,strength,phase}
+let fieldT = 0;       // field's own slow clock (advances each step)
+
+// cheap value-noise via summed sines — smooth, seamless, no tables
+function noise2(x,y,t){
+  return Math.sin(x*0.0042 + t*0.6) * Math.cos(y*0.0051 - t*0.4)
+       + 0.5*Math.sin((x+y)*0.0033 - t*0.9)
+       + 0.5*Math.cos((x-y)*0.0037 + t*0.7);
+}
+// velocity at a point, written into the shared out-vector [ofx,ofy] to avoid
+// allocating per call. Used to BAKE the coarse field grid (a few hundred calls
+// per frame) — never per particle. Per-particle sampling is sampleField() below.
+let ofx=0, ofy=0;
+function evalField(x,y){
+  const e=2.0, t=fieldT;
+  // curl of scalar noise: (∂n/∂y, -∂n/∂x) → divergence-free, looks like flow
+  const nx1=noise2(x,y+e,t), nx2=noise2(x,y-e,t);
+  const ny1=noise2(x+e,y,t), ny2=noise2(x-e,y,t);
+  let vx=(nx1-nx2)*22, vy=-(ny1-ny2)*22;   // base smooth-space drift
+  for(let i=0;i<sources.length;i++){
+    const s=sources[i];
+    const dx=x-s.x, dy=y-s.y; let d=Math.sqrt(dx*dx+dy*dy); if(d<1)d=1;
+    const fall=s.r/(d+s.r);                 // 1 near, →0 far
+    const ux=dx/d, uy=dy/d;
+    const k=s.strength*fall;
+    // a tight short-range pull (small orbit loops) PLUS a weak universal pull so
+    // ink that drifts far still falls back toward the well / the viewport.
+    const tight=s.strength*fall*fall;       // sharp, short reach → small loops
+    const pull=tight + s.strength*0.10;     // +constant tail = never lets go
+    switch(s.kind){
+      case 'attract': vx-=ux*pull; vy-=uy*pull; break;
+      case 'repel':   { const kk=k*fall; vx+=ux*kk; vy+=uy*kk; } break;  // sharper falloff → a tight, clean void
+      case 'swirl':   vx+=-uy*tight; vy+=ux*tight; break;         // tighter loops (sign kept for counter-rotation)
+      case 'flow':    vx+=Math.cos(s.phase)*k*1.4;
+                      vy+=Math.sin(s.phase)*k*1.4; break;
+      case 'shiver':  vx+=(noise2(x*9,y*9,t*7))*k;
+                      vy+=(noise2(y*9,x*9,t*7))*k; break;
+      case 'spiral':  vx+=-uy*tight; vy+=ux*tight;                 // tangential orbit (tight loops)
+                      vx-=ux*pull*0.6; vy-=uy*pull*0.6; break;     // inward drain + universal return
+      case 'gust':    { const g=Math.cos(s.phase), h=Math.sin(s.phase);
+                        vx+=g*k*1.6; vy+=h*k*1.6; } break;
+    }
+  }
+  ofx=vx; ofy=vy;
+}
+
+/* ---- baked field grid ----
+   The expensive curl-noise + source math is evaluated ONCE per frame onto a
+   coarse grid (~36px cells). Particles then read the field by bilinear
+   interpolation between the four surrounding grid nodes — O(1), no trig, no
+   allocation. This is not just faster: interpolating a baked field gives
+   smoother, more coherent flow than sampling noise independently per particle. */
+const FCELL=36;
+let FCOLS=0, FROWS=0, fvx=null, fvy=null;
+function allocField(){
+  FCOLS=Math.ceil(W/FCELL)+2; FROWS=Math.ceil(H/FCELL)+2;
+  fvx=new Float32Array(FCOLS*FROWS); fvy=new Float32Array(FCOLS*FROWS);
+}
+function bakeField(){
+  for(let j=0;j<FROWS;j++){
+    const y=(j-0.5)*FCELL;
+    for(let i=0;i<FCOLS;i++){
+      evalField((i-0.5)*FCELL, y);
+      const o=j*FCOLS+i; fvx[o]=ofx; fvy[o]=ofy;
+    }
+  }
+}
+// bilinear sample → writes ofx/ofy (shared out-vector, no allocation)
+function sampleField(x,y){
+  let gx=x/FCELL+0.5, gy=y/FCELL+0.5;
+  if(gx<0)gx=0; else if(gx>FCOLS-1.001)gx=FCOLS-1.001;
+  if(gy<0)gy=0; else if(gy>FROWS-1.001)gy=FROWS-1.001;
+  const i=gx|0, j=gy|0, fx=gx-i, fy=gy-j;
+  const o=j*FCOLS+i, o2=o+FCOLS;
+  const txa=fvx[o]+(fvx[o+1]-fvx[o])*fx;
+  const txb=fvx[o2]+(fvx[o2+1]-fvx[o2])*fx;
+  ofx=txa+(txb-txa)*fy;
+  const tya=fvy[o]+(fvy[o+1]-fvy[o])*fx;
+  const tyb=fvy[o2]+(fvy[o2+1]-fvy[o2])*fx;
+  ofy=tya+(tyb-tya)*fy;
+}
+
+/* ---- The ink: particles you shed, that live, diffuse, and fade ----
+   Each particle remembers its previous position so we can draw it as a short
+   streak along its own motion — the line becomes-physical as a smear of flow.
+   Age drives three becomings: diffusion grows (it spreads into weather),
+   mass/opacity decay (it fades into white), streaks lengthen then thin. */
+const MAXINK = 6000;
+let ink = [];   // {x,y,px,py,vx,vy,age,life,mass,seed}
+let inkHead = 0; // ring-buffer write head
+function shed(x,y, n, vx, vy){
+  for(let i=0;i<n;i++){
+    const a=Math.random()*6.283, r=Math.random()*4;
+    const life=5200+Math.random()*5200;
+    const mass=0.55+Math.random()*Math.random()*1.9;   // skew small: many fine, few fat
+    // inherit a fraction of the dot's motion → the ink is *thrown*, not just dropped
+    const px=x+Math.cos(a)*r, py=y+Math.sin(a)*r;
+    const p={x:px, y:py, px:px, py:py,
+             vx:(vx||0)*0.3+(Math.random()-0.5)*0.6,
+             vy:(vy||0)*0.3+(Math.random()-0.5)*0.6,
+             age:0, life, invLife:1/life,
+             mass, invMass:1/mass, grip:0.10/Math.sqrt(mass),
+             seed:Math.random()*6.283, f:0, txt:0, txtInit:0, hx:0, hy:0};
+    if(ink.length<MAXINK) ink.push(p);
+    else { ink[inkHead]=p; inkHead=(inkHead+1)%MAXINK; }
+  }
+}
+// a text-ink particle: born at its glyph position, held there (legible) early on,
+// released to the field late so the line dissolves into weather as it fades.
+function spawnTextInk(hx,hy,life,now){
+  const mass=1.0;
+  const jx=(Math.random()-0.5)*1.2, jy=(Math.random()-0.5)*1.2;
+  const p={x:hx+jx, y:hy+jy, px:hx, py:hy, vx:0, vy:0,
+           age:0, life, invLife:1/life,
+           mass, invMass:1/mass, grip:0.10,
+           seed:Math.random()*6.283, f:0, txt:1.0, txtInit:1, hx, hy};
+  if(ink.length<MAXINK) ink.push(p);
+  else { ink[inkHead]=p; inkHead=(inkHead+1)%MAXINK; }
+}
+function stepInk(dt){
+  const sub=dt*0.06;
+  const n=ink.length;
+  for(let idx=0;idx<n;idx++){
+    const p=ink[idx];
+    p.age+=dt;
+    const f=p.age*p.invLife;
+    sampleField(p.x,p.y);            // writes ofx/ofy — no allocation, no trig
+    if(p.txtInit){
+      // text-ink: decays from 1.0 (held) to 0.0 (fully ink) between f = 0.4 and 0.75
+      p.txt = Math.max(0, Math.min(1, (0.75 - f) / 0.35));
+      const txt = p.txt;
+      const release = f*f;           // 0 held → 1 free
+      const fieldPull = lerp(1.0, release, txt);
+      p.vx += (ofx*sub - p.vx)*p.grip*fieldPull;
+      p.vy += (ofy*sub - p.vy)*p.grip*fieldPull;
+      
+      // spring back to glyph home, only when txt > 0
+      if(txt > 0){
+        const k = 0.22*(1-release)*txt;
+        p.vx += (p.hx-p.x)*k;
+        p.vy += (p.hy-p.y)*k;
+        // damping: 0.78 for text, 1.0 for ink
+        const damping = lerp(1.0, 0.78, txt);
+        p.vx *= damping;
+        p.vy *= damping;
+      }
+      
+      // diffusion:
+      const textDiff = (0.05+f*1.1)*release;
+      const inkDiff = (0.12+f*1.7)*p.invMass;
+      const diff = lerp(inkDiff, textDiff, txt);
+      
+      p.px=p.x; p.py=p.y;
+      p.x += p.vx + (Math.random()-0.5)*diff;
+      p.y += p.vy + (Math.random()-0.5)*diff;
+    }else{
+      // the field is a force the particle eases toward; heavier ink resists more →
+      // momentum, overshoot, drift. This is what makes it feel like matter.
+      p.vx += (ofx*sub - p.vx)*p.grip;
+      p.vy += (ofy*sub - p.vy)*p.grip;
+      // diffusion grows with age and is gentler on heavy ink (it holds together longer)
+      const diff=(0.12+f*1.7)*p.invMass;
+      p.px=p.x; p.py=p.y;
+      p.x += p.vx + (Math.random()-0.5)*diff;
+      p.y += p.vy + (Math.random()-0.5)*diff;
+    }
+    p.f=f;                           // cache normalized age for the renderer
+  }
+  // retire the dead by in-place compaction (only when the array can still grow)
+  if(n && ink.length<MAXINK){
+    let w=0; for(let i=0;i<n;i++){ const q=ink[i]; if(q.age<q.life) ink[w++]=q; }
+    ink.length=w;
+  }
+}
+
+/* ---- story beats: the field-state changes ----
+   Press SPACE / → to move the world through states (← to go back).
+   This is the spec's "region-dependent physics as a felt beat", in miniature.
+   Each beat may also name a `voice` line that surfaces when you enter it. */
+const C=()=>({x:W*0.5,y:H*0.5});
+const beats = [
+  {name:'still', voice:"Smooth space. Nothing pulls. Only the slow breath of the white.",
+    build:()=>{ sources.length=0; }},
+  {name:'well', voice:"Something here wants you. Feel the ink lean in.",
+    build:()=>{ sources.length=0; sources.push({...C(),kind:'attract',r:110,strength:60,phase:0}); }},
+  {name:'stone', voice:"And something here will not be touched. The line parts around it.",
+    build:()=>{ sources.length=0; sources.push({...C(),kind:'repel',r:150,strength:75,phase:0}); }},
+  {name:'orbit', voice:"Caught between holding and letting go — so it circles.",
+    build:()=>{ sources.length=0; sources.push({...C(),kind:'swirl',r:150,strength:58,phase:0});
+                sources.push({...C(),kind:'attract',r:90,strength:24,phase:0}); }},
+  {name:'vortex', voice:"A throat in the world. Everything spirals down and is remade.",
+    build:()=>{ sources.length=0; sources.push({...C(),kind:'spiral',r:150,strength:62,phase:0}); }},
+  {name:'two', voice:"Two centres now. Your ink belongs wholly to neither.",
+    build:()=>{ sources.length=0;
+                sources.push({x:W*0.34,y:H*0.5,kind:'swirl',r:200,strength:48,phase:0});
+                sources.push({x:W*0.66,y:H*0.5,kind:'swirl',r:200,strength:-48,phase:0}); }},
+  {name:'current', voice:"A current takes you sideways. You cannot draw a straight line here.",
+    build:()=>{ sources.length=0; sources.push({...C(),kind:'flow',r:9999,strength:34,phase:-0.5}); }},
+  {name:'weather', voice:"It has all become weather. What you made, the air is wearing now.",
+    build:()=>{ sources.length=0; sources.push({...C(),kind:'shiver',r:9999,strength:30,phase:0});
+                sources.push({x:W*0.32,y:H*0.42,kind:'swirl',r:180,strength:32,phase:0}); }},
+];
+let beat=0;
+function setBeat(i){
+  beat=(i+beats.length)%beats.length;
+  beats[beat].build();
+  sayNow(beats[beat].voice);   // speak the beat as you enter it
+}
+
+/* ---- events: things the world DOES on its own ----
+   Transient sources that arrive, live a little, and dissolve. They make the
+   plateau feel inhabited even when you hold still. `t`/`life` ramp strength in
+   and out so nothing pops; some roam; some leave a word in the negative space. */
+const events = [];
+function spawnEvent(){
+  const kinds=[
+    // a passing swirl that drifts across — "a thought that crosses"
+    ()=>({kind:'swirl', x:Math.random()*W, y:Math.random()*H, r:150, peak:46,
+          vx:(Math.random()-0.5)*0.5, vy:(Math.random()-0.5)*0.5, life:9000,
+          word:"something passes through"}),
+    // a brief gust from one edge — "a breath of weather"
+    ()=>{ const ang=Math.random()*6.283;
+          return {kind:'gust', x:W*0.5,y:H*0.5,r:9999, peak:34, phase:ang,
+                  vx:0,vy:0, life:4200, word:null}; },
+    // a sink that opens, drains, and closes — "a quiet swallowing"
+    ()=>({kind:'spiral', x:W*(0.2+Math.random()*0.6), y:H*(0.2+Math.random()*0.6),
+          r:170, peak:58, vx:0,vy:0, life:7000, word:"a quiet swallowing"}),
+    // a heartbeat: a pulse that pushes out, then pulls in
+    ()=>({kind:'attract', x:W*(0.3+Math.random()*0.4), y:H*(0.3+Math.random()*0.4),
+          r:200, peak:70, pulse:true, vx:0,vy:0, life:6000, word:null}),
+  ];
+  const e=kinds[(Math.random()*kinds.length)|0]();
+  e.t=0; e.strength=0; e.phase=e.phase||0;
+  sources.push(e); events.push(e);
+  if(e.word) sayNow("“"+e.word+"”");
+}
+function stepEvents(dt){
+  for(let i=events.length-1;i>=0;i--){
+    const e=events[i];
+    e.t+=dt;
+    const f=e.t/e.life;
+    // smooth ramp in (first 25%) and out (last 30%)
+    let env = f<0.25 ? f/0.25 : f>0.7 ? (1-f)/0.3 : 1;
+    env=Math.max(0,Math.min(1,env));
+    if(e.pulse){ e.strength = e.peak*env*Math.sin(e.t*0.004); }   // heartbeat: out then in
+    else        e.strength = e.peak*env;
+    e.x+=e.vx*dt*0.05; e.y+=e.vy*dt*0.05;
+    if(e.t>=e.life){
+      const si=sources.indexOf(e); if(si>=0) sources.splice(si,1);
+      events.splice(i,1);
+    }
+  }
+}
+// pace events on a soft random timer — sparse, so each one is felt
+let nextEvent=4000;
+function maybeEvent(dt){
+  nextEvent-=dt;
+  if(nextEvent<=0){ spawnEvent(); nextEvent=7000+Math.random()*9000; }
+}
+
+/* ---- occupancy grid: where ink and hand are, so text can avoid them ---- */
+const GC = 9, GR = 6;           // grid cols/rows
+let grid = new Float32Array(GC*GR);
+function buildOccupancy(){
+  grid.fill(0);
+  const cw=W/GC, ch=H/GR;
+  const mark=(x,y,w)=>{
+    const cx=Math.floor(x/cw), cy=Math.floor(y/ch);
+    if(cx>=0&&cx<GC&&cy>=0&&cy<GR) grid[cy*GC+cx]+=w;
+  };
+  // sample the ink (every few particles is enough)
+  for(let i=0;i<ink.length;i+=8) mark(ink[i].x,ink[i].y,0.5);
+  // the dot
+  mark(dot.x,dot.y,4);
+  // the hand, with a soft halo into neighbours
+  if(mouse.inside){
+    mark(mouse.x,mouse.y,30);
+    mark(mouse.x-cw,mouse.y,8); mark(mouse.x+cw,mouse.y,8);
+    mark(mouse.x,mouse.y-ch,8); mark(mouse.x,mouse.y+ch,8);
+  }
+}
+function emptiestCell(){
+  // Score every cell: prefer empty, but also prefer cells that are not in the
+  // corners, are clear of the dead-centre where the dot lives, and sit away
+  // from the hand/dot. A small jitter breaks ties so successive lines don't
+  // pile into the same place (this is why it used to default to top-left).
+  const cw=W/GC, ch=H/GR;
+  const midX=(GC-1)/2, midY=(GR-1)/2;
+  const dcx=dot.x/cw-0.5, dcy=dot.y/ch-0.5;     // dot position in cell units
+  let best=0, bv=1e9;
+  for(let i=0;i<grid.length;i++){
+    const cx=i%GC, cy=(i/GC|0);
+    let v=grid[i]*1.0;
+    // edge penalty: keep text off the rim, weakest in the comfortable middle band
+    v += (Math.abs(cx-midX)/midX)*0.8 + (Math.abs(cy-midY)/midY)*0.8;
+    // dead-centre penalty (the dot/cursor usually live here)
+    if(Math.abs(cx-midX)<1 && Math.abs(cy-midY)<1) v+=2.5;
+    // reward distance from the dot so the voice speaks away from the hand
+    const dd=Math.hypot(cx-dcx,cy-dcy);
+    v -= Math.min(dd,4)*0.18;
+    // tie-break jitter from a moving seed (no Math.random in tie loop hot path is fine here)
+    v += (Math.sin(i*12.9898+jitterSeed)*0.5+0.5)*0.25;
+    if(v<bv){bv=v;best=i;}
+  }
+  const cx=best%GC, cy=(best/GC|0);
+  return {x:(cx+0.5)*cw, y:(cy+0.5)*ch, emptiness:Math.max(0,1-grid[best]/2)};
+}
+let jitterSeed=0;   // nudged each time we place a line, so placement varies
+
+/* ---- the voice: text made of ink ----
+   Stillpoint's words don't print — they *precipitate*. We rasterise the line to
+   a tiny offscreen canvas, scan its covered pixels, and emit ink particles that
+   are softly held to the glyph shapes (so the words are legible) while still
+   breathing in the field. When the line's time is up, the hold releases and the
+   field carries the letters off as weather. The voice is the same matter as
+   everything else — diegetic, never a UI layer. */
+const script = [
+  "A dot. A white that does not end.",
+  "Move, and you leave a little of yourself behind.",
+  "It will not stay. Watch it become weather.",
+  "“You found out you could move.”",
+  "“Everything you make, the air will take.”",
+  "“Make it anyway. I'll be the place you went from.”",
+];
+// offscreen rasteriser, reused
+const gcv=document.createElement('canvas'), gctx=gcv.getContext('2d');
+function glyphPoints(text, fontPx){
+  const scale = 3;
+  const scaledFontPx = fontPx * scale;
+  gctx.font='400 '+scaledFontPx+'px Georgia, "EB Garamond", "Times New Roman", serif';
+  const w=Math.ceil(gctx.measureText(text).width)+8*scale, h=Math.ceil(scaledFontPx*1.6);
+  gcv.width=w; gcv.height=h;
+  gctx.font='400 '+scaledFontPx+'px Georgia, "EB Garamond", "Times New Roman", serif';
+  gctx.textBaseline='middle'; gctx.fillStyle='#000';
+  gctx.clearRect(0,0,w,h); gctx.fillText(text,4*scale,h*0.5);
+  const data=gctx.getImageData(0,0,w,h).data, pts=[];
+  const step=3;                               // sampling density along the glyphs (1px CSS spacing)
+  for(let y=0;y<h;y+=step) for(let x=0;x<w;x+=step){
+    if(data[(y*w+x)*4+3]>100) pts.push((x-w*0.5)/scale, (y-h*0.5)/scale);  // local, centred
+  }
+  return {pts, w: w/scale, h: h/scale};
+}
+let si=-1, lastAdvance=0, voiceBusyUntil=0;
+function speak(text, now){
+  if(!text) return;
+  const fontPx=Math.max(20, Math.min(30, W*0.022));
+  const g=glyphPoints(text, fontPx);
+  const cell=emptiestCell();
+  // keep the line on-screen
+  const cx=Math.max(g.w*0.5+10, Math.min(W-g.w*0.5-10, cell.x));
+  const cy=Math.max(g.h*0.5+10, Math.min(H-g.h*0.5-10, cell.y));
+  const life=8000; // extended for more elegant flow time after release
+  for(let i=0;i<g.pts.length;i+=2){
+    const hx=cx+g.pts[i], hy=cy+g.pts[i+1];
+    spawnTextInk(hx,hy,life,now);
+  }
+  lastAdvance=now; voiceBusyUntil=now+life;
+  jitterSeed+=1.7;
+}
+function sayNow(text){ speak(text, performance.now()); }
+function advanceVoice(now){
+  if(si>=script.length-1) return;
+  if(now-lastAdvance < 5200) return;
+  if(now<voiceBusyUntil) return;             // don't speak over a line still resolving
+  if(Math.hypot(dot.vx,dot.vy)>9) return;    // wait for a quiet beat
+  si++; speak(script[si], now);
+}
+
+/* ---- render ---- */
+function drawDot(){
+  // the carried point — small, filled, a touch of motion-blur from its own speed
+  const sp=Math.hypot(dot.vx,dot.vy);
+  const r=4.4 + Math.min(1.2, sp*0.05);
+  ctx.beginPath(); ctx.arc(dot.x,dot.y,r,0,7); ctx.fillStyle=INK; ctx.fill();
+}
+/* Batched ink renderer. Thousands of particles → ~AB×WB batched paths.
+   We bucket each particle by quantized (alpha, width). Within a bucket every
+   mark shares globalAlpha + lineWidth, so we can lay them all into ONE path and
+   issue a single stroke()/fill(). This collapses ~4500 draw calls into ~18 and
+   removes per-particle state churn — the dominant render cost.
+   Streaks (moving ink) stroke; near-still ink draws as a tiny round cap, which
+   a single zero-length-segment stroke with round caps renders for free. */
+const AB=6, WB=3;                 // alpha buckets, width buckets
+const AMAX=0.82;                  // top alpha — raised so ink (and words) read clearly
+const batches=[];                 // batches[wb*AB+ab] = {alpha, width, path}
+function buildBatches(){
+  for(let w=0;w<WB;w++) for(let a=0;a<AB;a++){
+    batches[w*AB+a]={ alpha:(a+1)/AB*AMAX, width:0.6+w*1.0, path:new Path2D() };
+  }
+}
+function drawInk(){
+  // reset paths each frame
+  for(let b=0;b<batches.length;b++) batches[b].path=new Path2D();
+  const pulseBase=fieldT*12;
+  const n=ink.length;
+  let hasText=false;
+  for(let i=0;i<n;i++){
+    const p=ink[i];
+    if(p.txtInit && p.txt > 0.85){ hasText=true; continue; }  // text-ink drawn in its own pass below
+    const f=p.f;                          // normalized age, cached in stepInk
+    let a;
+    let w;
+    if(p.txtInit){
+      // interpolate alpha and width for transitioning text-ink
+      const aText = AMAX*Math.min(1,(1-f)*2.4)*Math.min(1,f*10+0.12);
+      const aInk = (1-f)*(1-f)*0.55;
+      a = lerp(aInk, aText, p.txt);
+      
+      const wInk = p.mass*1.3*(1-f*0.7);
+      w = lerp(wInk, 1.5, p.txt);
+    } else {
+      a=(1-f)*(1-f)*0.55;
+      w=p.mass*1.3*(1-f*0.7);
+    }
+    a*=0.85+0.15*Math.sin(pulseBase+p.seed);   // faint living pulse
+    if(a<0.012) continue;
+    // bucket indices, using Math.round for closer width matching
+    let ab=(a/AMAX*AB)|0; if(ab>=AB)ab=AB-1; if(ab<0)ab=0;
+    let wb=Math.round((w-0.6)/1.0); if(wb>=WB)wb=WB-1; if(wb<0)wb=0;
+    const path=batches[wb*AB+ab].path;
+    const dx=p.x-p.px, dy=p.y-p.py;
+    if(dx*dx+dy*dy<0.25){                  // near-still → short real segment (round cap = dot)
+      path.moveTo(p.x-0.4,p.y); path.lineTo(p.x+0.4,p.y);
+    }else{                                 // moving → streak along its motion
+      path.moveTo(p.px,p.py); path.lineTo(p.x,p.y);
+    }
+  }
+  ctx.lineCap='round'; ctx.strokeStyle=INK;
+  for(let b=0;b<batches.length;b++){
+    const bt=batches[b];
+    ctx.globalAlpha=bt.alpha; ctx.lineWidth=bt.width;
+    ctx.stroke(bt.path);
+  }
+  ctx.globalAlpha=1;
+  // ---- text-ink pass: crisp filled discs so the words are always legible ----
+  if(hasText){
+    ctx.fillStyle=INK;
+    for(let i=0;i<n;i++){
+      const p=ink[i];
+      if(!p.txtInit || p.txt <= 0.85) continue;
+      const f=p.f;
+      // quick fade-in, long hold (no late fade-out here since it transitions below 0.85)
+      const a=AMAX*Math.min(1,(1-f)*2.4)*Math.min(1,f*10+0.12);
+      if(a<0.02) continue;
+      ctx.globalAlpha=a;
+      ctx.beginPath(); ctx.arc(p.x,p.y,0.75,0,7); ctx.fill();
+    }
+    ctx.globalAlpha=1;
+  }
+}
+
+/* ---- loop ---- */
+let acc=0, last=0, shedRemainder=0;
+function stepDot(dt){
+  // the point eases toward the cursor — your position has a little weight
+  const tx = mouse.inside?mouse.x:dot.x, ty = mouse.inside?mouse.y:dot.y;
+  dot.px=dot.x; dot.py=dot.y;
+  dot.x += (tx-dot.x)*0.22;
+  dot.y += (ty-dot.y)*0.22;
+  dot.vx=dot.x-dot.px; dot.vy=dot.y-dot.py;
+  // shed ink in proportion to how fast you move — stillness leaves nothing
+  const sp=Math.hypot(dot.vx,dot.vy);
+  shedRemainder += sp*0.5;
+  const n=Math.floor(shedRemainder); shedRemainder-=n;
+  if(n>0) shed(dot.x,dot.y, Math.min(n,12), dot.vx, dot.vy);
+}
+function frame(now){
+  if(!last) last=now;
+  let dt=now-last; last=now; if(dt>50) dt=50;
+  acc+=dt;
+  const STEP=16.67;
+  stepTheme(dt);
+  INK = inkColor();         // recompute the frame's ink colour once
+  fieldT += dt*0.00018;     // advance the field clock once per frame…
+  bakeField();              // …and bake the velocity grid once (was per-particle)
+  while(acc>=STEP){ stepDot(STEP); stepEvents(STEP); stepInk(STEP); acc-=STEP; }
+  maybeEvent(dt);
+  buildOccupancy();
+  advanceVoice(now);
+
+  // paint the world's substance (no clearRect — the background IS a colour now)
+  ctx.fillStyle=bgColor(); ctx.fillRect(0,0,W,H);
+  drawInk();
+  drawDot();
+  requestAnimationFrame(frame);
+}
+let INK='#111';
+
+/* ---- input: the dot follows the cursor; SPACE / click changes the field-state ---- */
+function pos(e){
+  const t = e.touches ? e.touches[0] : e;
+  mouse.x=t.clientX; mouse.y=t.clientY; mouse.inside=true;
+}
+window.addEventListener('mousemove',pos);
+cv.addEventListener('mouseleave',()=>{mouse.inside=false;});
+cv.addEventListener('mouseenter',()=>{mouse.inside=true;});
+cv.addEventListener('touchmove',(e)=>{pos(e);e.preventDefault();},{passive:false});
+cv.addEventListener('touchstart',(e)=>{pos(e);e.preventDefault();},{passive:false});
+// Space inverts brightness (light ⇄ dark); arrows / click move through beats
+function nextBeat(){ setBeat(beat+1); }
+window.addEventListener('keydown',(e)=>{
+  if(e.code==='Space'){ toggleTheme(); e.preventDefault(); }
+  else if(e.code==='ArrowRight'){ nextBeat(); e.preventDefault(); }
+  else if(e.code==='ArrowLeft'){ setBeat(beat-1); e.preventDefault(); } });
+cv.addEventListener('click',nextBeat);
+// the one DOM control: invert button (mirrors the Space key)
+document.getElementById('uiTheme').addEventListener('click',(e)=>{ toggleTheme(); e.stopPropagation(); });
+
+/* ---- go ---- */
+buildBatches(); resize(); placeDot(); setBeat(0); requestAnimationFrame(frame);
+</script>
+</body>
+</html>
