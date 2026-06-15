@@ -140,9 +140,10 @@ function evalField(x,y){
    allocation. This is not just faster: interpolating a baked field gives
    smoother, more coherent flow than sampling noise independently per particle. */
 const FCELL=36;
+const INV_FCELL = 1 / FCELL;
 let FCOLS=0, FROWS=0, fvx=null, fvy=null;
 function allocField(){
-  FCOLS=Math.ceil(W/FCELL)+2; FROWS=Math.ceil(H/FCELL)+2;
+  FCOLS=Math.ceil(W*INV_FCELL)+2; FROWS=Math.ceil(H*INV_FCELL)+2;
   fvx=new Float32Array(FCOLS*FROWS); fvy=new Float32Array(FCOLS*FROWS);
 }
 function bakeField(){
@@ -156,7 +157,7 @@ function bakeField(){
 }
 // bilinear sample → writes ofx/ofy (shared out-vector, no allocation)
 function sampleField(x,y){
-  let gx=x/FCELL+0.5, gy=y/FCELL+0.5;
+  let gx=x*INV_FCELL+0.5, gy=y*INV_FCELL+0.5;
   if(gx<0)gx=0; else if(gx>FCOLS-1.001)gx=FCOLS-1.001;
   if(gy<0)gy=0; else if(gy>FROWS-1.001)gy=FROWS-1.001;
   const i=gx|0, j=gy|0, fx=gx-i, fy=gy-j;
@@ -176,9 +177,15 @@ function sampleField(x,y){
    mass/opacity decay (it fades into white), streaks lengthen then thin. */
 const MAXINK = 6000;
 let ink = [];   // {x,y,px,py,vx,vy,age,life,mass,seed}
-let inkHead = 0; // ring-buffer write head
+// Precomputed random table for fast particle diffusion in hot loops
+const RAND_SIZE = 2048;
+const randTable = new Float32Array(RAND_SIZE);
+for(let i=0; i<RAND_SIZE; i++) randTable[i] = Math.random() - 0.5;
+let randIdx = 0;
+
 function shed(x,y, n, vx, vy){
   for(let i=0;i<n;i++){
+    if(ink.length>=MAXINK) break;
     const a=Math.random()*6.283, r=Math.random()*4;
     const life=5200+Math.random()*5200;
     const mass=0.55+Math.random()*Math.random()*1.9;   // skew small: many fine, few fat
@@ -190,21 +197,20 @@ function shed(x,y, n, vx, vy){
              age:0, life, invLife:1/life,
              mass, invMass:1/mass, grip:0.10/Math.sqrt(mass),
              seed:Math.random()*6.283, f:0, txt:0, txtInit:0, hx:0, hy:0};
-    if(ink.length<MAXINK) ink.push(p);
-    else { ink[inkHead]=p; inkHead=(inkHead+1)%MAXINK; }
+    ink.push(p);
   }
 }
 // a text-ink particle: born at its glyph position, held there (legible) early on,
 // released to the field late so the line dissolves into weather as it fades.
 function spawnTextInk(hx,hy,life,now){
+  if(ink.length>=MAXINK) return;
   const mass=1.0;
   const jx=(Math.random()-0.5)*1.2, jy=(Math.random()-0.5)*1.2;
   const p={x:hx+jx, y:hy+jy, px:hx, py:hy, vx:0, vy:0,
            age:0, life, invLife:1/life,
            mass, invMass:1/mass, grip:0.10,
            seed:Math.random()*6.283, f:0, txt:1.0, txtInit:1, hx, hy};
-  if(ink.length<MAXINK) ink.push(p);
-  else { ink[inkHead]=p; inkHead=(inkHead+1)%MAXINK; }
+  ink.push(p);
 }
 function stepInk(dt){
   const sub=dt*0.06;
@@ -239,9 +245,13 @@ function stepInk(dt){
       const inkDiff = (0.12+f*1.7)*p.invMass;
       const diff = lerp(inkDiff, textDiff, txt);
       
+      // fast precomputed random lookup
+      const rx = randTable[randIdx]; randIdx = (randIdx + 1) & 2047;
+      const ry = randTable[randIdx]; randIdx = (randIdx + 1) & 2047;
+      
       p.px=p.x; p.py=p.y;
-      p.x += p.vx + (Math.random()-0.5)*diff;
-      p.y += p.vy + (Math.random()-0.5)*diff;
+      p.x += p.vx + rx*diff;
+      p.y += p.vy + ry*diff;
     }else{
       // the field is a force the particle eases toward; heavier ink resists more →
       // momentum, overshoot, drift. This is what makes it feel like matter.
@@ -249,14 +259,19 @@ function stepInk(dt){
       p.vy += (ofy*sub - p.vy)*p.grip;
       // diffusion grows with age and is gentler on heavy ink (it holds together longer)
       const diff=(0.12+f*1.7)*p.invMass;
+      
+      // fast precomputed random lookup
+      const rx = randTable[randIdx]; randIdx = (randIdx + 1) & 2047;
+      const ry = randTable[randIdx]; randIdx = (randIdx + 1) & 2047;
+      
       p.px=p.x; p.py=p.y;
-      p.x += p.vx + (Math.random()-0.5)*diff;
-      p.y += p.vy + (Math.random()-0.5)*diff;
+      p.x += p.vx + rx*diff;
+      p.y += p.vy + ry*diff;
     }
     p.f=f;                           // cache normalized age for the renderer
   }
-  // retire the dead by in-place compaction (only when the array can still grow)
-  if(n && ink.length<MAXINK){
+  // retire the dead by in-place compaction (always, to avoid processing dead particles)
+  if(n){
     let w=0; for(let i=0;i<n;i++){ const q=ink[i]; if(q.age<q.life) ink[w++]=q; }
     ink.length=w;
   }
@@ -408,6 +423,9 @@ const script = [
   "Move, and you leave a little of yourself behind.",
   "It will not stay. Watch it become weather.",
   "“You found out you could move.”",
+  "“There is no beginning or end; there is only the middle.”",
+  "“To flee is not to escape, but to create a path.”",
+  "“The self is only a threshold, a door, a passage.”",
   "“Everything you make, the air will take.”",
   "“Make it anyway. I'll be the place you went from.”",
 ];
@@ -432,7 +450,7 @@ function glyphPoints(text, fontPx){
 let si=-1, lastAdvance=0, voiceBusyUntil=0;
 function speak(text, now){
   if(!text) return;
-  const fontPx=Math.max(20, Math.min(30, W*0.022));
+  const fontPx=Math.max(14, Math.min(20, W*0.015)); // smaller default font size for a minimal aesthetic
   const g=glyphPoints(text, fontPx);
   const cell=emptiestCell();
   // keep the line on-screen
