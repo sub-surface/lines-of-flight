@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "lines-of-flight",
+  "compatibility_date": "2026-06-15",
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "./public"
+  },
+  "routes": [
+    {
+      "pattern": "lines.subsurfaces.net",
+      "custom_domain": true
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "lines-of-flight",
+  "version": "1.0.0",
+  "description": "A dot that stays, a line that leaves. A meditative canvas experience. Deployed at lines.subsurfaces.net.",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail lines-of-flight",
+    "preview": "wrangler dev --remote"
+  },
+  "devDependencies": {
+    "wrangler": "^4.100.0"
+  }
+}
