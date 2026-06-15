@@ -84,10 +84,11 @@ const mouse = {x:0,y:0,inside:false};
    One velocity field sampled anywhere in the plane. It is the sum of:
      • a slow curl-noise base (the breathing of smooth space)
      • field-sources, each a body that warps the space around it.
-   A source's `kind` selects how it warps: attract, repel, flow, swirl, shiver.
-   These are not five mechanics but five faces of one field — and the set of
-   live sources is a STORY STATE we change at beats (see beats[] below). */
-const sources = [];   // {x,y,kind,r,strength,phase}
+   A source's `A` and `B` parameters unify all radial/vortical forces (attract,
+   repel, swirl, spiral) into a single algebraic potential flow field.
+   The set of live sources is a STORY STATE we change at beats (see beats[]). */
+const sources = [];   // {x,y,A,B,r2,shiver}
+let globalFlow = {x:0, y:0};
 let fieldT = 0;       // field's own slow clock (advances each step)
 
 // cheap value-noise via summed sines — smooth, seamless, no tables
@@ -101,33 +102,36 @@ function noise2(x,y,t){
 // per frame) — never per particle. Per-particle sampling is sampleField() below.
 let ofx=0, ofy=0;
 function evalField(x,y){
-  const e=2.0, t=fieldT;
+  const t=fieldT, e=2.0;
   // curl of scalar noise: (∂n/∂y, -∂n/∂x) → divergence-free, looks like flow
   const nx1=noise2(x,y+e,t), nx2=noise2(x,y-e,t);
   const ny1=noise2(x+e,y,t), ny2=noise2(x-e,y,t);
-  let vx=(nx1-nx2)*22, vy=-(ny1-ny2)*22;   // base smooth-space drift
+  let vx=(nx1-nx2)*22 + globalFlow.x, vy=-(ny1-ny2)*22 + globalFlow.y;
+  
+  // Add active gusts from events
+  for(let i=0; i<events.length; i++){
+    if(events[i].gust && events[i].vxFlow){
+      vx += events[i].vxFlow;
+      vy += events[i].vyFlow;
+    }
+  }
+  
   for(let i=0;i<sources.length;i++){
     const s=sources[i];
-    const dx=x-s.x, dy=y-s.y; let d=Math.sqrt(dx*dx+dy*dy); if(d<1)d=1;
-    const fall=s.r/(d+s.r);                 // 1 near, →0 far
-    const ux=dx/d, uy=dy/d;
-    const k=s.strength*fall;
-    // a tight short-range pull (small orbit loops) PLUS a weak universal pull so
-    // ink that drifts far still falls back toward the well / the viewport.
-    const tight=s.strength*fall*fall;       // sharp, short reach → small loops
-    const pull=tight + s.strength*0.10;     // +constant tail = never lets go
-    switch(s.kind){
-      case 'attract': vx-=ux*pull; vy-=uy*pull; break;
-      case 'repel':   { const kk=k*fall; vx+=ux*kk; vy+=uy*kk; } break;  // sharper falloff → a tight, clean void
-      case 'swirl':   vx+=-uy*tight; vy+=ux*tight; break;         // tighter loops (sign kept for counter-rotation)
-      case 'flow':    vx+=Math.cos(s.phase)*k*1.4;
-                      vy+=Math.sin(s.phase)*k*1.4; break;
-      case 'shiver':  vx+=(noise2(x*9,y*9,t*7))*k;
-                      vy+=(noise2(y*9,x*9,t*7))*k; break;
-      case 'spiral':  vx+=-uy*tight; vy+=ux*tight;                 // tangential orbit (tight loops)
-                      vx-=ux*pull*0.6; vy-=uy*pull*0.6; break;     // inward drain + universal return
-      case 'gust':    { const g=Math.cos(s.phase), h=Math.sin(s.phase);
-                        vx+=g*k*1.6; vy+=h*k*1.6; } break;
+    if(s.gust) continue; // handled above as global flow
+    const dx=x-s.x, dy=y-s.y;
+    const d2=dx*dx+dy*dy;
+    const denom=1/(d2+s.r2); // single reciprocal, zero square roots!
+    
+    if(s.shiver){
+      vx += (noise2(x*9,y*9,t*7))*30*denom*s.r2;
+      vy += (noise2(y*9,x*9,t*7))*30*denom*s.r2;
+    } else {
+      // s.A = radial strength (sink/source), s.B = rotational strength (vortex)
+      const A = s.currA !== undefined ? s.currA : s.A;
+      const B = s.currB !== undefined ? s.currB : s.B;
+      vx += (A * dx + B * dy) * denom;
+      vy += (A * dy - B * dx) * denom;
     }
   }
   ofx=vx; ofy=vy;
@@ -175,7 +179,7 @@ function sampleField(x,y){
    streak along its own motion — the line becomes-physical as a smear of flow.
    Age drives three becomings: diffusion grows (it spreads into weather),
    mass/opacity decay (it fades into white), streaks lengthen then thin. */
-const MAXINK = 6000;
+const MAXINK = 12000; // extended particle budget for longer lingering trails
 let ink = [];   // {x,y,px,py,vx,vy,age,life,mass,seed}
 // Precomputed random table for fast particle diffusion in hot loops
 const RAND_SIZE = 2048;
@@ -187,7 +191,7 @@ function shed(x,y, n, vx, vy){
   for(let i=0;i<n;i++){
     if(ink.length>=MAXINK) break;
     const a=Math.random()*6.283, r=Math.random()*4;
-    const life=5200+Math.random()*5200;
+    const life=8000+Math.random()*12000; // extended tail life (8s to 20s)
     const mass=0.55+Math.random()*Math.random()*1.9;   // skew small: many fine, few fat
     // inherit a fraction of the dot's motion → the ink is *thrown*, not just dropped
     const px=x+Math.cos(a)*r, py=y+Math.sin(a)*r;
@@ -283,26 +287,30 @@ function stepInk(dt){
    Each beat may also name a `voice` line that surfaces when you enter it. */
 const C=()=>({x:W*0.5,y:H*0.5});
 const beats = [
-  {name:'still', voice:"Smooth space. Nothing pulls. Only the slow breath of the white.",
-    build:()=>{ sources.length=0; }},
-  {name:'well', voice:"Something here wants you. Feel the ink lean in.",
-    build:()=>{ sources.length=0; sources.push({...C(),kind:'attract',r:110,strength:60,phase:0}); }},
-  {name:'stone', voice:"And something here will not be touched. The line parts around it.",
-    build:()=>{ sources.length=0; sources.push({...C(),kind:'repel',r:150,strength:75,phase:0}); }},
-  {name:'orbit', voice:"Caught between holding and letting go — so it circles.",
-    build:()=>{ sources.length=0; sources.push({...C(),kind:'swirl',r:150,strength:58,phase:0});
-                sources.push({...C(),kind:'attract',r:90,strength:24,phase:0}); }},
-  {name:'vortex', voice:"A throat in the world. Everything spirals down and is remade.",
-    build:()=>{ sources.length=0; sources.push({...C(),kind:'spiral',r:150,strength:62,phase:0}); }},
-  {name:'two', voice:"Two centres now. Your ink belongs wholly to neither.",
-    build:()=>{ sources.length=0;
-                sources.push({x:W*0.34,y:H*0.5,kind:'swirl',r:200,strength:48,phase:0});
-                sources.push({x:W*0.66,y:H*0.5,kind:'swirl',r:200,strength:-48,phase:0}); }},
-  {name:'current', voice:"A current takes you sideways. You cannot draw a straight line here.",
-    build:()=>{ sources.length=0; sources.push({...C(),kind:'flow',r:9999,strength:34,phase:-0.5}); }},
-  {name:'weather', voice:"It has all become weather. What you made, the air is wearing now.",
-    build:()=>{ sources.length=0; sources.push({...C(),kind:'shiver',r:9999,strength:30,phase:0});
-                sources.push({x:W*0.32,y:H*0.42,kind:'swirl',r:180,strength:32,phase:0}); }},
+  {name:'still', voice:"“A line of flight is not made of two points. It passes between points, it comes up through the middle.”",
+    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0; }},
+  {name:'well', voice:"“To flee is not to renounce action; there is nothing more active than a flight.”",
+    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
+                sources.push({x:W*0.5, y:H*0.5, A:-8000, B:0, r2:12100}); }},
+  {name:'stone', voice:"“Lodge yourself on a stratum, experiment with the opportunities it offers, finding possible lines of flight.”",
+    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
+                sources.push({x:W*0.5, y:H*0.5, A:12000, B:0, r2:22500}); }},
+  {name:'orbit', voice:"“The self is only a threshold, a door, a becoming between two multiplicities.”",
+    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
+                sources.push({x:W*0.5, y:H*0.5, A:-2500, B:9000, r2:22500}); }},
+  {name:'vortex', voice:"“To become imperceptible, to make a line, to find your line of flight.”",
+    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
+                sources.push({x:W*0.5, y:H*0.5, A:-6000, B:10000, r2:22500}); }},
+  {name:'two', voice:"“We were never going to touch. We needed a between.”",
+    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
+                sources.push({x:W*0.34, y:H*0.5, A:0, B:10000, r2:40000});
+                sources.push({x:W*0.66, y:H*0.5, A:0, B:-10000, r2:40000}); }},
+  {name:'current', voice:"“Writing has to be liquid or gaseous simply because normal perception is solid.”",
+    build:()=>{ sources.length=0; globalFlow.x=34*1.4; globalFlow.y=0; }},
+  {name:'weather', voice:"“What you made, the air is wearing now. The line becomes weather.”",
+    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
+                sources.push({x:W*0.5, y:H*0.5, A:0, B:0, r2:10000, shiver:true});
+                sources.push({x:W*0.32, y:H*0.42, A:0, B:6000, r2:32400}); }},
 ];
 let beat=0;
 function setBeat(i){
@@ -318,23 +326,24 @@ function setBeat(i){
 const events = [];
 function spawnEvent(){
   const kinds=[
-    // a passing swirl that drifts across — "a thought that crosses"
-    ()=>({kind:'swirl', x:Math.random()*W, y:Math.random()*H, r:150, peak:46,
+    // a passing swirl that drifts across — "something passes through"
+    ()=>({A:0, B:7000, r2:22500, x:Math.random()*W, y:Math.random()*H,
           vx:(Math.random()-0.5)*0.5, vy:(Math.random()-0.5)*0.5, life:9000,
           word:"something passes through"}),
     // a brief gust from one edge — "a breath of weather"
     ()=>{ const ang=Math.random()*6.283;
-          return {kind:'gust', x:W*0.5,y:H*0.5,r:9999, peak:34, phase:ang,
-                  vx:0,vy:0, life:4200, word:null}; },
+          return {gust:true, phase:ang, peak:34, x:W*0.5, y:H*0.5, r2:1e8,
+                  vx:0, vy:0, life:4200, word:null}; },
     // a sink that opens, drains, and closes — "a quiet swallowing"
-    ()=>({kind:'spiral', x:W*(0.2+Math.random()*0.6), y:H*(0.2+Math.random()*0.6),
-          r:170, peak:58, vx:0,vy:0, life:7000, word:"a quiet swallowing"}),
+    ()=>({A:-10000, B:10000, r2:28900, x:W*(0.2+Math.random()*0.6), y:H*(0.2+Math.random()*0.6),
+          vx:0, vy:0, life:7000, word:"a quiet swallowing"}),
     // a heartbeat: a pulse that pushes out, then pulls in
-    ()=>({kind:'attract', x:W*(0.3+Math.random()*0.4), y:H*(0.3+Math.random()*0.4),
-          r:200, peak:70, pulse:true, vx:0,vy:0, life:6000, word:null}),
+    ()=>({pulse:true, peak:-14000, r2:40000, x:W*(0.3+Math.random()*0.4), y:H*(0.3+Math.random()*0.4),
+          vx:0, vy:0, life:6000, word:null}),
   ];
   const e=kinds[(Math.random()*kinds.length)|0]();
   e.t=0; e.strength=0; e.phase=e.phase||0;
+  e.A = e.A||0; e.B = e.B||0;
   sources.push(e); events.push(e);
   if(e.word) sayNow("“"+e.word+"”");
 }
@@ -346,8 +355,17 @@ function stepEvents(dt){
     // smooth ramp in (first 25%) and out (last 30%)
     let env = f<0.25 ? f/0.25 : f>0.7 ? (1-f)/0.3 : 1;
     env=Math.max(0,Math.min(1,env));
-    if(e.pulse){ e.strength = e.peak*env*Math.sin(e.t*0.004); }   // heartbeat: out then in
-    else        e.strength = e.peak*env;
+    
+    if(e.pulse){
+      e.currA = e.peak * env * Math.sin(e.t * 0.004);
+    } else if(e.gust){
+      e.vxFlow = Math.cos(e.phase) * e.peak * 1.6 * env;
+      e.vyFlow = Math.sin(e.phase) * e.peak * 1.6 * env;
+    } else {
+      e.currA = e.A * env;
+      e.currB = e.B * env;
+    }
+    
     e.x+=e.vx*dt*0.05; e.y+=e.vy*dt*0.05;
     if(e.t>=e.life){
       const si=sources.indexOf(e); if(si>=0) sources.splice(si,1);
@@ -456,7 +474,7 @@ function speak(text, now){
   // keep the line on-screen
   const cx=Math.max(g.w*0.5+10, Math.min(W-g.w*0.5-10, cell.x));
   const cy=Math.max(g.h*0.5+10, Math.min(H-g.h*0.5-10, cell.y));
-  const life=8000; // extended for more elegant flow time after release
+  const life=16000; // extended for more elegant flow and drift time (16 seconds)
   for(let i=0;i<g.pts.length;i+=2){
     const hx=cx+g.pts[i], hy=cy+g.pts[i+1];
     spawnTextInk(hx,hy,life,now);
@@ -501,6 +519,7 @@ function drawInk(){
   const pulseBase=fieldT*12;
   const n=ink.length;
   let hasText=false;
+  const INV_AMAX_AB = AB / AMAX;
   for(let i=0;i<n;i++){
     const p=ink[i];
     if(p.txtInit && p.txt > 0.85){ hasText=true; continue; }  // text-ink drawn in its own pass below
@@ -510,20 +529,20 @@ function drawInk(){
     if(p.txtInit){
       // interpolate alpha and width for transitioning text-ink
       const aText = AMAX*Math.min(1,(1-f)*2.4)*Math.min(1,f*10+0.12);
-      const aInk = (1-f)*(1-f)*0.55;
+      const aInk = (1-f)*0.55; // extended linear fade
       a = lerp(aInk, aText, p.txt);
       
       const wInk = p.mass*1.3*(1-f*0.7);
       w = lerp(wInk, 1.5, p.txt);
     } else {
-      a=(1-f)*(1-f)*0.55;
+      a=(1-f)*0.55; // extended linear fade for lingering trails
       w=p.mass*1.3*(1-f*0.7);
     }
     a*=0.85+0.15*Math.sin(pulseBase+p.seed);   // faint living pulse
     if(a<0.012) continue;
-    // bucket indices, using Math.round for closer width matching
-    let ab=(a/AMAX*AB)|0; if(ab>=AB)ab=AB-1; if(ab<0)ab=0;
-    let wb=Math.round((w-0.6)/1.0); if(wb>=WB)wb=WB-1; if(wb<0)wb=0;
+    // bucket indices, using precomputed division and direct round
+    let ab=(a*INV_AMAX_AB)|0; if(ab>=AB)ab=AB-1; if(ab<0)ab=0;
+    let wb=Math.round(w-0.6); if(wb>=WB)wb=WB-1; if(wb<0)wb=0;
     const path=batches[wb*AB+ab].path;
     const dx=p.x-p.px, dy=p.y-p.py;
     if(dx*dx+dy*dy<0.25){                  // near-still → short real segment (round cap = dot)
