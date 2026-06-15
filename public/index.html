@@ -4,6 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Lines of Flight</title>
+<meta name="description" content="A dot that stays, a line that leaves. A minimal, meditative canvas, worn in the philosophy of Deleuze.">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Lines of Flight">
+<meta property="og:description" content="A dot that stays, a line that leaves. A meditation in living ink.">
+<meta property="og:url" content="https://lines.subsurfaces.net/">
+<!-- animated GIF first (Discord/Slack/Telegram animate it); PNG fallback for the rest -->
+<meta property="og:image" content="https://lines.subsurfaces.net/og.gif">
+<meta property="og:image:type" content="image/gif">
+<meta property="og:image" content="https://lines.subsurfaces.net/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Lines of Flight">
+<meta name="twitter:description" content="A dot that stays, a line that leaves. A meditation in living ink.">
+<meta name="twitter:image" content="https://lines.subsurfaces.net/og.png">
 <style>
   html,body{margin:0;height:100%;overflow:hidden;background:#FAFAF8;cursor:none;
     -webkit-user-select:none;user-select:none;touch-action:none;}
@@ -58,6 +75,43 @@ function resize(){
 }
 window.addEventListener('resize', resize);
 
+/* ---- camera: scroll to zoom, with a particle-budget LOD ----
+   Particles, sources and the dot live in WORLD space. The camera maps world
+   → screen: screen = (world - cam) * zoom. Default is identity (zoom 1, no
+   pan), so with the wheel untouched nothing changes from the original game.
+
+   The trick that keeps zoom cheap: the baked field grid stays sized to the
+   SCREEN (constant FCOLS×FROWS no matter the zoom), but each node samples the
+   WORLD coordinate under it — so a zoomed-in view bakes the same number of
+   cells over a smaller slice of world. And because a smaller slice of world is
+   visible, fewer particles are needed for the same on-screen density: shed
+   rate scales by 1/zoom and out-of-view ink is culled, so the particle count
+   never explodes as you zoom in. */
+const cam = { zoom:1, x:0, y:0, tzoom:1 };   // x,y = world coord at screen (0,0)
+const ZMIN=0.35, ZMAX=6;
+function screenToWorldX(sx){ return cam.x + sx/cam.zoom; }
+function screenToWorldY(sy){ return cam.y + sy/cam.zoom; }
+// zoom toward a screen anchor (cursor), keeping the world point under it fixed
+function zoomAt(sx, sy, factor){
+  const wx = screenToWorldX(sx), wy = screenToWorldY(sy);
+  cam.tzoom = Math.max(ZMIN, Math.min(ZMAX, cam.tzoom*factor));
+  // pan so (wx,wy) stays under (sx,sy) at the NEW (eventual) zoom is eased in
+  // stepCam; here we set the target anchor so the ease converges correctly.
+  cam._ax=sx; cam._ay=sy; cam._wx=wx; cam._wy=wy;
+}
+function stepCam(dt){
+  const z0=cam.zoom;
+  cam.zoom += (cam.tzoom-cam.zoom)*Math.min(1,dt*0.012);
+  if(Math.abs(cam.zoom-cam.tzoom)<0.0005) cam.zoom=cam.tzoom;
+  if(cam._wx!==undefined){
+    // keep the anchored world point pinned under the anchor screen pixel
+    cam.x = cam._wx - cam._ax/cam.zoom;
+    cam.y = cam._wy - cam._ay/cam.zoom;
+    if(cam.zoom===cam.tzoom){ cam._wx=cam._wy=undefined; }
+  }
+  return cam.zoom!==z0;
+}
+
 /* ---- theme: light paper ⇄ dark, eased so the world *breathes* between them ----
    `mix` runs 0 (light) → 1 (dark); pressing Space eases it across. Background
    and ink colours are interpolated from it, so a single value inverts the world. */
@@ -76,9 +130,10 @@ function stepTheme(dt){ theme.mix += (theme.target-theme.mix)*Math.min(1,dt*0.00
 /* ---- the Dot: Stillpoint, now carried — it locks to the cursor ----
    The dot is the point you are; the line is what you shed behind it.
    It eases toward the cursor so even your own position has a little weight. */
-const dot = {x:0,y:0,px:0,py:0,vx:0,vy:0};
+const dot = {x:0,y:0,px:0,py:0,vx:0,vy:0};   // world space
 function placeDot(){ dot.x=dot.px=W*0.5; dot.y=dot.py=H*0.5; }
-const mouse = {x:0,y:0,inside:false};
+// mouse.sx/sy = screen pixels (for zoom anchor); x/y = world coord under cursor
+const mouse = {sx:0,sy:0,x:0,y:0,inside:false};
 
 /* ---- The field: invisible forces between bodies ----
    One velocity field sampled anywhere in the plane. It is the sum of:
@@ -150,18 +205,23 @@ function allocField(){
   FCOLS=Math.ceil(W*INV_FCELL)+2; FROWS=Math.ceil(H*INV_FCELL)+2;
   fvx=new Float32Array(FCOLS*FROWS); fvy=new Float32Array(FCOLS*FROWS);
 }
+// Grid node (i,j) covers the WORLD coord under screen pixel ((i-0.5)*FCELL,…).
+// At zoom z, one screen cell = FCELL px = FCELL/z world units, so the whole
+// grid spans the visible world rect. Cost is independent of zoom.
 function bakeField(){
+  const wcell = FCELL/cam.zoom;          // world units per grid cell
   for(let j=0;j<FROWS;j++){
-    const y=(j-0.5)*FCELL;
+    const y=cam.y + (j-0.5)*wcell;
     for(let i=0;i<FCOLS;i++){
-      evalField((i-0.5)*FCELL, y);
+      evalField(cam.x + (i-0.5)*wcell, y);
       const o=j*FCOLS+i; fvx[o]=ofx; fvy[o]=ofy;
     }
   }
 }
-// bilinear sample → writes ofx/ofy (shared out-vector, no allocation)
+// bilinear sample at a WORLD point → writes ofx/ofy (shared out-vector).
 function sampleField(x,y){
-  let gx=x*INV_FCELL+0.5, gy=y*INV_FCELL+0.5;
+  const zInvCell = cam.zoom*INV_FCELL;
+  let gx=(x-cam.x)*zInvCell+0.5, gy=(y-cam.y)*zInvCell+0.5;
   if(gx<0)gx=0; else if(gx>FCOLS-1.001)gx=FCOLS-1.001;
   if(gy<0)gy=0; else if(gy>FROWS-1.001)gy=FROWS-1.001;
   const i=gx|0, j=gy|0, fx=gx-i, fy=gy-j;
@@ -179,9 +239,28 @@ function sampleField(x,y){
    streak along its own motion — the line becomes-physical as a smear of flow.
    Age drives three becomings: diffusion grows (it spreads into weather),
    mass/opacity decay (it fades into white), streaks lengthen then thin. */
-const MAXINK = 12000; // extended particle budget for longer lingering trails
-let ink = [];   // {x,y,px,py,vx,vy,age,life,mass,seed}
-// Precomputed random table for fast particle diffusion in hot loops
+/* Structure-of-Arrays particle pool — the performance heart.
+   Every particle field is a column in a pre-allocated Float32Array. There is
+   NO per-particle object and NO allocation after startup: shedding writes into
+   slot `count`, death compacts in place. This removes the steady-state GC churn
+   (12k objects born and freed every second) that was the main source of the
+   periodic lag spikes, and keeps the hot loop cache-friendly. The math is
+   identical to the old object version — same character, same detail. */
+const MAXINK = 12000;
+let count = 0;                    // live particle count
+const px_=new Float32Array(MAXINK), py_=new Float32Array(MAXINK);   // prev pos
+const x_ =new Float32Array(MAXINK), y_ =new Float32Array(MAXINK);   // pos
+const vx_=new Float32Array(MAXINK), vy_=new Float32Array(MAXINK);   // vel
+const age_=new Float32Array(MAXINK), invLife_=new Float32Array(MAXINK);
+const invMass_=new Float32Array(MAXINK), grip_=new Float32Array(MAXINK);
+const seed_=new Float32Array(MAXINK), f_=new Float32Array(MAXINK);
+const txt_=new Float32Array(MAXINK);            // text-hold value (0 = pure ink)
+const txtInit_=new Uint8Array(MAXINK);          // is this a text particle?
+const hx_=new Float32Array(MAXINK), hy_=new Float32Array(MAXINK);   // glyph home
+const mass_=new Float32Array(MAXINK);
+// expose a tiny shim so the OG/test tooling and any reader can see the count
+const ink = { get length(){ return count; } };
+
 const RAND_SIZE = 2048;
 const randTable = new Float32Array(RAND_SIZE);
 for(let i=0; i<RAND_SIZE; i++) randTable[i] = Math.random() - 0.5;
@@ -189,101 +268,88 @@ let randIdx = 0;
 
 function shed(x,y, n, vx, vy){
   for(let i=0;i<n;i++){
-    if(ink.length>=MAXINK) break;
+    if(count>=MAXINK) break;
     const a=Math.random()*6.283, r=Math.random()*4;
-    const life=8000+Math.random()*12000; // extended tail life (8s to 20s)
+    const life=8000+Math.random()*12000; // 8s–20s tail life
     const mass=0.55+Math.random()*Math.random()*1.9;   // skew small: many fine, few fat
-    // inherit a fraction of the dot's motion → the ink is *thrown*, not just dropped
-    const px=x+Math.cos(a)*r, py=y+Math.sin(a)*r;
-    const p={x:px, y:py, px:px, py:py,
-             vx:(vx||0)*0.3+(Math.random()-0.5)*0.6,
-             vy:(vy||0)*0.3+(Math.random()-0.5)*0.6,
-             age:0, life, invLife:1/life,
-             mass, invMass:1/mass, grip:0.10/Math.sqrt(mass),
-             seed:Math.random()*6.283, f:0, txt:0, txtInit:0, hx:0, hy:0};
-    ink.push(p);
+    const sx=x+Math.cos(a)*r, sy=y+Math.sin(a)*r;
+    const k=count++;
+    x_[k]=px_[k]=sx; y_[k]=py_[k]=sy;
+    vx_[k]=(vx||0)*0.3+(Math.random()-0.5)*0.6;
+    vy_[k]=(vy||0)*0.3+(Math.random()-0.5)*0.6;
+    age_[k]=0; invLife_[k]=1/life; mass_[k]=mass; invMass_[k]=1/mass;
+    grip_[k]=0.10/Math.sqrt(mass); seed_[k]=Math.random()*6.283;
+    f_[k]=0; txt_[k]=0; txtInit_[k]=0; hx_[k]=0; hy_[k]=0;
   }
 }
-// a text-ink particle: born at its glyph position, held there (legible) early on,
-// released to the field late so the line dissolves into weather as it fades.
-function spawnTextInk(hx,hy,life,now){
-  if(ink.length>=MAXINK) return;
-  const mass=1.0;
+// text-ink: born at its glyph position, held there (legible), released to the
+// field late so the line dissolves into weather as it fades.
+function spawnTextInk(hx,hy,life){
+  if(count>=MAXINK) return;
   const jx=(Math.random()-0.5)*1.2, jy=(Math.random()-0.5)*1.2;
-  const p={x:hx+jx, y:hy+jy, px:hx, py:hy, vx:0, vy:0,
-           age:0, life, invLife:1/life,
-           mass, invMass:1/mass, grip:0.10,
-           seed:Math.random()*6.283, f:0, txt:1.0, txtInit:1, hx, hy};
-  ink.push(p);
+  const k=count++;
+  x_[k]=hx+jx; y_[k]=hy+jy; px_[k]=hx; py_[k]=hy; vx_[k]=0; vy_[k]=0;
+  age_[k]=0; invLife_[k]=1/life; mass_[k]=1; invMass_[k]=1; grip_[k]=0.10;
+  seed_[k]=Math.random()*6.283; f_[k]=0; txt_[k]=1; txtInit_[k]=1; hx_[k]=hx; hy_[k]=hy;
 }
 function stepInk(dt){
   const sub=dt*0.06;
-  const n=ink.length;
-  for(let idx=0;idx<n;idx++){
-    const p=ink[idx];
-    p.age+=dt;
-    const f=p.age*p.invLife;
-    sampleField(p.x,p.y);            // writes ofx/ofy — no allocation, no trig
-    if(p.txtInit){
-      // text-ink: decays from 1.0 (held) to 0.0 (fully ink) between f=0.4 and f=0.75
-      p.txt = Math.max(0, Math.min(1, (0.75 - f) / 0.35));
-      const txt = p.txt;
-      const release = f*f;           // 0 held → 1 free
-
-      if(txt === 0){
-        // graduated: clear the text flag and kick the particle with field velocity
-        // so it flows naturally into the surrounding ink rather than sitting inert
-        p.txtInit = 0;
-        p.vx = ofx * sub * 3.5;
-        p.vy = ofy * sub * 3.5;
-      }
-
-      const fieldPull = lerp(1.0, release, txt);
-      p.vx += (ofx*sub - p.vx)*p.grip*fieldPull;
-      p.vy += (ofy*sub - p.vy)*p.grip*fieldPull;
-
-      // spring back to glyph home, only when still text
+  const n=count;
+  for(let k=0;k<n;k++){
+    const age=age_[k]+dt; age_[k]=age;
+    const f=age*invLife_[k];
+    sampleField(x_[k],y_[k]);         // writes ofx/ofy
+    const grip=grip_[k];
+    if(txtInit_[k]){
+      const txt = Math.max(0, Math.min(1, (0.75 - f) / 0.35)); txt_[k]=txt;
+      const release = f*f;
+      let vx=vx_[k], vy=vy_[k];
+      if(txt === 0){ txtInit_[k]=0; vx = ofx*sub*3.5; vy = ofy*sub*3.5; }
+      const fieldPull = 1+(release-1)*txt;            // lerp(1, release, txt)
+      vx += (ofx*sub - vx)*grip*fieldPull;
+      vy += (ofy*sub - vy)*grip*fieldPull;
       if(txt > 0){
-        const k = 0.22*(1-release)*txt;
-        p.vx += (p.hx-p.x)*k;
-        p.vy += (p.hy-p.y)*k;
-        const damping = lerp(1.0, 0.78, txt);
-        p.vx *= damping;
-        p.vy *= damping;
+        const kk = 0.22*(1-release)*txt;
+        vx += (hx_[k]-x_[k])*kk; vy += (hy_[k]-y_[k])*kk;
+        const damping = 1+(0.78-1)*txt;
+        vx *= damping; vy *= damping;
       }
-
       const textDiff = (0.05+f*1.1)*release;
-      const inkDiff = (0.12+f*1.7)*p.invMass;
-      const diff = lerp(inkDiff, textDiff, txt);
-
-      const rx = randTable[randIdx]; randIdx = (randIdx + 1) & 2047;
-      const ry = randTable[randIdx]; randIdx = (randIdx + 1) & 2047;
-
-      p.px=p.x; p.py=p.y;
-      p.x += p.vx + rx*diff;
-      p.y += p.vy + ry*diff;
+      const inkDiff = (0.12+f*1.7)*invMass_[k];
+      const diff = inkDiff+(textDiff-inkDiff)*txt;
+      const rx = randTable[randIdx]; randIdx=(randIdx+1)&2047;
+      const ry = randTable[randIdx]; randIdx=(randIdx+1)&2047;
+      px_[k]=x_[k]; py_[k]=y_[k];
+      x_[k]+=vx+rx*diff; y_[k]+=vy+ry*diff; vx_[k]=vx; vy_[k]=vy;
     }else{
-      // the field is a force the particle eases toward; heavier ink resists more →
-      // momentum, overshoot, drift. This is what makes it feel like matter.
-      p.vx += (ofx*sub - p.vx)*p.grip;
-      p.vy += (ofy*sub - p.vy)*p.grip;
-      // diffusion grows with age and is gentler on heavy ink (it holds together longer)
-      const diff=(0.12+f*1.7)*p.invMass;
-      
-      // fast precomputed random lookup
-      const rx = randTable[randIdx]; randIdx = (randIdx + 1) & 2047;
-      const ry = randTable[randIdx]; randIdx = (randIdx + 1) & 2047;
-      
-      p.px=p.x; p.py=p.y;
-      p.x += p.vx + rx*diff;
-      p.y += p.vy + ry*diff;
+      let vx=vx_[k], vy=vy_[k];
+      vx += (ofx*sub - vx)*grip; vy += (ofy*sub - vy)*grip;
+      const diff=(0.12+f*1.7)*invMass_[k];
+      const rx = randTable[randIdx]; randIdx=(randIdx+1)&2047;
+      const ry = randTable[randIdx]; randIdx=(randIdx+1)&2047;
+      px_[k]=x_[k]; py_[k]=y_[k];
+      x_[k]+=vx+rx*diff; y_[k]+=vy+ry*diff; vx_[k]=vx; vy_[k]=vy;
     }
-    p.f=f;                           // cache normalized age for the renderer
+    f_[k]=f;
   }
-  // retire the dead by in-place compaction (always, to avoid processing dead particles)
+  // compact dead + cull far-off-screen ink, copying columns in place.
   if(n){
-    let w=0; for(let i=0;i<n;i++){ const q=ink[i]; if(q.age<q.life) ink[w++]=q; }
-    ink.length=w;
+    const m = 200/cam.zoom;
+    const x0=cam.x-m, x1=cam.x+W/cam.zoom+m, y0=cam.y-m, y1=cam.y+H/cam.zoom+m;
+    let w=0;
+    for(let k=0;k<n;k++){
+      if(age_[k]*invLife_[k]>=1) continue;
+      const xx=x_[k], yy=y_[k];
+      if(xx<x0||xx>x1||yy<y0||yy>y1) continue;
+      if(w!==k){
+        px_[w]=px_[k]; py_[w]=py_[k]; x_[w]=xx; y_[w]=yy; vx_[w]=vx_[k]; vy_[w]=vy_[k];
+        age_[w]=age_[k]; invLife_[w]=invLife_[k]; invMass_[w]=invMass_[k]; grip_[w]=grip_[k];
+        seed_[w]=seed_[k]; f_[w]=f_[k]; txt_[w]=txt_[k]; txtInit_[w]=txtInit_[k];
+        hx_[w]=hx_[k]; hy_[w]=hy_[k]; mass_[w]=mass_[k];
+      }
+      w++;
+    }
+    count=w;
   }
 }
 
@@ -291,32 +357,35 @@ function stepInk(dt){
    Press SPACE / → to move the world through states (← to go back).
    This is the spec's "region-dependent physics as a felt beat", in miniature.
    Each beat may also name a `voice` line that surfaces when you enter it. */
-const C=()=>({x:W*0.5,y:H*0.5});
+// world coord at a screen fraction, under the current camera — so beats centre
+// on what you're actually looking at, even when zoomed or panned.
+const vw=(fx)=>screenToWorldX(W*fx), vh=(fy)=>screenToWorldY(H*fy);
+const C=()=>({x:vw(0.5),y:vh(0.5)});
 const beats = [
   {name:'still', voice:"“A line of flight is not made of two points. It passes between points, it comes up through the middle.”",
     build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0; }},
   {name:'well', voice:"“To flee is not to renounce action; there is nothing more active than a flight.”",
     build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
-                sources.push({x:W*0.5, y:H*0.5, A:-8000, B:0, r2:12100}); }},
+                sources.push({x:vw(0.5), y:vh(0.5), A:-8000, B:0, r2:12100}); }},
   {name:'stone', voice:"“Lodge yourself on a stratum, experiment with the opportunities it offers, finding possible lines of flight.”",
     build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
-                sources.push({x:W*0.5, y:H*0.5, A:12000, B:0, r2:22500}); }},
+                sources.push({x:vw(0.5), y:vh(0.5), A:12000, B:0, r2:22500}); }},
   {name:'orbit', voice:"“The self is only a threshold, a door, a becoming between two multiplicities.”",
     build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
-                sources.push({x:W*0.5, y:H*0.5, A:-2500, B:9000, r2:22500}); }},
+                sources.push({x:vw(0.5), y:vh(0.5), A:-2500, B:9000, r2:22500}); }},
   {name:'vortex', voice:"“To become imperceptible, to make a line, to find your line of flight.”",
     build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
-                sources.push({x:W*0.5, y:H*0.5, A:-6000, B:10000, r2:22500}); }},
+                sources.push({x:vw(0.5), y:vh(0.5), A:-6000, B:10000, r2:22500}); }},
   {name:'two', voice:"“We were never going to touch. We needed a between.”",
     build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
-                sources.push({x:W*0.34, y:H*0.5, A:0, B:10000, r2:40000});
-                sources.push({x:W*0.66, y:H*0.5, A:0, B:-10000, r2:40000}); }},
+                sources.push({x:vw(0.34), y:vh(0.5), A:0, B:10000, r2:40000});
+                sources.push({x:vw(0.66), y:vh(0.5), A:0, B:-10000, r2:40000}); }},
   {name:'current', voice:"“Writing has to be liquid or gaseous simply because normal perception is solid.”",
     build:()=>{ sources.length=0; globalFlow.x=34*1.4; globalFlow.y=0; }},
   {name:'weather', voice:"“What you made, the air is wearing now. The line becomes weather.”",
     build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
-                sources.push({x:W*0.5, y:H*0.5, A:0, B:0, r2:10000, shiver:true});
-                sources.push({x:W*0.32, y:H*0.42, A:0, B:6000, r2:32400}); }},
+                sources.push({x:vw(0.5), y:vh(0.5), A:0, B:0, r2:10000, shiver:true});
+                sources.push({x:vw(0.32), y:vh(0.42), A:0, B:6000, r2:32400}); }},
 ];
 let beat=0;
 function setBeat(i){
@@ -333,18 +402,18 @@ const events = [];
 function spawnEvent(){
   const kinds=[
     // a passing swirl that drifts across — "something passes through"
-    ()=>({A:0, B:7000, r2:22500, x:Math.random()*W, y:Math.random()*H,
+    ()=>({A:0, B:7000, r2:22500, x:vw(Math.random()), y:vh(Math.random()),
           vx:(Math.random()-0.5)*0.5, vy:(Math.random()-0.5)*0.5, life:9000,
           word:"something passes through"}),
     // a brief gust from one edge — "a breath of weather"
     ()=>{ const ang=Math.random()*6.283;
-          return {gust:true, phase:ang, peak:34, x:W*0.5, y:H*0.5, r2:1e8,
+          return {gust:true, phase:ang, peak:34, x:vw(0.5), y:vh(0.5), r2:1e8,
                   vx:0, vy:0, life:4200, word:null}; },
     // a sink that opens, drains, and closes — "a quiet swallowing"
-    ()=>({A:-10000, B:10000, r2:28900, x:W*(0.2+Math.random()*0.6), y:H*(0.2+Math.random()*0.6),
+    ()=>({A:-10000, B:10000, r2:28900, x:vw(0.2+Math.random()*0.6), y:vh(0.2+Math.random()*0.6),
           vx:0, vy:0, life:7000, word:"a quiet swallowing"}),
     // a heartbeat: a pulse that pushes out, then pulls in
-    ()=>({pulse:true, peak:-14000, r2:40000, x:W*(0.3+Math.random()*0.4), y:H*(0.3+Math.random()*0.4),
+    ()=>({pulse:true, peak:-14000, r2:40000, x:vw(0.3+Math.random()*0.4), y:vh(0.3+Math.random()*0.4),
           vx:0, vy:0, life:6000, word:null}),
   ];
   const e=kinds[(Math.random()*kinds.length)|0]();
@@ -386,25 +455,38 @@ function maybeEvent(dt){
   if(nextEvent<=0){ spawnEvent(); nextEvent=7000+Math.random()*9000; }
 }
 
-/* ---- occupancy grid: where ink and hand are, so text can avoid them ---- */
+/* ---- occupancy grid: where ink and hand are, so text can avoid them ----
+   Worked in SCREEN space (the voice is placed where it can be READ), so world
+   positions are projected through the camera first. */
 const GC = 9, GR = 6;           // grid cols/rows
 let grid = new Float32Array(GC*GR);
-function buildOccupancy(){
+// recent voice placements (screen coords), each fading so the next line steers
+// clear of where the last few landed — the text-overlap guard.
+const recentLines = [];  // {sx,sy,until}
+function buildOccupancy(now){
   grid.fill(0);
   const cw=W/GC, ch=H/GR;
-  const mark=(x,y,w)=>{
-    const cx=Math.floor(x/cw), cy=Math.floor(y/ch);
+  const z=cam.zoom;
+  const mark=(sx,sy,w)=>{          // sx,sy in SCREEN px
+    const cx=Math.floor(sx/cw), cy=Math.floor(sy/ch);
     if(cx>=0&&cx<GC&&cy>=0&&cy<GR) grid[cy*GC+cx]+=w;
   };
-  // sample the ink (every few particles is enough)
-  for(let i=0;i<ink.length;i+=8) mark(ink[i].x,ink[i].y,0.5);
+  // sample the ink (every few particles is enough), projecting world→screen
+  for(let i=0;i<count;i+=8){ mark((x_[i]-cam.x)*z,(y_[i]-cam.y)*z,0.5); }
   // the dot
-  mark(dot.x,dot.y,4);
-  // the hand, with a soft halo into neighbours
+  mark((dot.x-cam.x)*z,(dot.y-cam.y)*z,4);
+  // the hand (already screen), with a soft halo into neighbours
   if(mouse.inside){
-    mark(mouse.x,mouse.y,30);
-    mark(mouse.x-cw,mouse.y,8); mark(mouse.x+cw,mouse.y,8);
-    mark(mouse.x,mouse.y-ch,8); mark(mouse.x,mouse.y+ch,8);
+    mark(mouse.sx,mouse.sy,30);
+    mark(mouse.sx-cw,mouse.sy,8); mark(mouse.sx+cw,mouse.sy,8);
+    mark(mouse.sx,mouse.sy-ch,8); mark(mouse.sx,mouse.sy+ch,8);
+  }
+  // recently-placed lines still on screen: stamp a decaying penalty so a new
+  // line won't be dropped on top of one that hasn't faded yet.
+  for(let i=recentLines.length-1;i>=0;i--){ const r=recentLines[i];
+    const left=r.until-now;
+    if(left<=0){ recentLines.splice(i,1); continue; }
+    mark(r.sx,r.sy, 6*Math.min(1,left/8000));   // weight fades with remaining life
   }
 }
 function emptiestCell(){
@@ -414,7 +496,9 @@ function emptiestCell(){
   // pile into the same place (this is why it used to default to top-left).
   const cw=W/GC, ch=H/GR;
   const midX=(GC-1)/2, midY=(GR-1)/2;
-  const dcx=dot.x/cw-0.5, dcy=dot.y/ch-0.5;     // dot position in cell units
+  // dot in SCREEN cell units (it lives in world space; project through camera)
+  const dsx=(dot.x-cam.x)*cam.zoom, dsy=(dot.y-cam.y)*cam.zoom;
+  const dcx=dsx/cw-0.5, dcy=dsy/ch-0.5;
   let best=0, bv=1e9;
   for(let i=0;i<grid.length;i++){
     const cx=i%GC, cy=(i/GC|0);
@@ -452,7 +536,7 @@ const script = shuffle([
   "Still. And already it is going.",
   "The white is not empty. It is waiting.",
   "You are always in the middle of something.",
-  "What you shed becomes the world’s hair.",
+  "What you shed, the field is wearing now.",
   "Go on. I’ll be the place you went from.",
   // --- A Thousand Plateaus ---
   "“A line of flight is not made of two points.”",
@@ -460,10 +544,9 @@ const script = shuffle([
   "“Between things does not designate a relation but a direction.”",
   "“Write to the nth power, the n−1 power… subtract the unique.”",
   "“A rhizome has no beginning or end; it is always in the middle.”",
-  "“Lodge yourself on a stratum, experiment with opportunities it offers.”",
-  "“Find an advantageous place on it, find potential movements of deterritorialization.”",
+  "“Lodge yourself on a stratum, experiment with the opportunities it offers.”",
+  "“Find an advantageous place, find the potential movements that flee it.”",
   "“Experiment, never interpret.”",
-  "“All identity is simulation.”",
   "“The middle is by no means an average; it is where things pick up speed.”",
   "“The painter does not paint on a white surface. The surface is already full of clichés.”",
   "“Smooth space is occupied by intensities, winds, noises, tactile qualities, and above all by a line of flight.”",
@@ -573,22 +656,32 @@ const script = shuffle([
 ]);
 // offscreen rasteriser, reused
 const gcv=document.createElement('canvas'), gctx=gcv.getContext('2d');
+// Rasterise a line to a small offscreen canvas and scan covered pixels → glyph
+// points. Cached by text so a repeated line never re-rasterises (the getImageData
+// readback is the costliest single op here). Scale 2× + step 2 keeps glyph
+// fidelity while cutting the readback+scan area ~4× vs the old 3× / step-3.
+const glyphCache = new Map();
 function glyphPoints(text, fontPx){
-  const scale = 3;
+  const key = text+'@'+(fontPx|0);
+  const hit = glyphCache.get(key);
+  if(hit) return hit;
+  const scale = 2;
   const scaledFontPx = fontPx * scale;
-  gctx.font='400 '+scaledFontPx+'px Georgia, "EB Garamond", "Times New Roman", serif';
-  // 2.0× height gives full room for ascenders + descenders; prevents horizontal cut
+  const font='400 '+scaledFontPx+'px Georgia, "EB Garamond", "Times New Roman", serif';
+  gctx.font=font;
   const w=Math.ceil(gctx.measureText(text).width)+12*scale, h=Math.ceil(scaledFontPx*2.0);
   gcv.width=w; gcv.height=h;
-  gctx.font='400 '+scaledFontPx+'px Georgia, "EB Garamond", "Times New Roman", serif';
-  gctx.textBaseline='middle'; gctx.fillStyle='#000';
+  gctx.font=font; gctx.textBaseline='middle'; gctx.fillStyle='#000';
   gctx.clearRect(0,0,w,h); gctx.fillText(text,6*scale,h*0.5);
   const data=gctx.getImageData(0,0,w,h).data, pts=[];
-  const step=3;                               // 1px CSS spacing at 3× scale
+  const step=2;
   for(let y=0;y<h;y+=step) for(let x=0;x<w;x+=step){
     if(data[(y*w+x)*4+3]>100) pts.push((x-w*0.5)/scale, (y-h*0.5)/scale);
   }
-  return {pts, w: w/scale, h: h/scale};
+  const res={pts, w: w/scale, h: h/scale};
+  if(glyphCache.size>64) glyphCache.clear();   // bound the cache
+  glyphCache.set(key, res);
+  return res;
 }
 let si=-1, lastAdvance=0, voiceBusyUntil=0;
 /* ---- deferred text-particle spawn queue ----
@@ -596,37 +689,57 @@ let si=-1, lastAdvance=0, voiceBusyUntil=0;
    one frame. Instead speak() stores the point list and drainSpawnQueue() bleeds
    it out at SPAWN_RATE particles per frame — the words still appear in under
    one second but the frame budget is never blown. */
-let spawnPts=null, spawnCx=0, spawnCy=0, spawnLife=0, spawnIdx=0;
+// spawn centre is stored in WORLD coords; glyph offsets are screen px scaled by
+// 1/zoom so the words read at a constant on-screen size whatever the zoom.
+let spawnPts=null, spawnCx=0, spawnCy=0, spawnLife=0, spawnIdx=0, spawnInvZoom=1;
 const SPAWN_RATE=180; // particles born per frame from queue (~10 frames to fill)
 function drainSpawnQueue(){
   if(!spawnPts||spawnIdx>=spawnPts.length) return;
   const end=Math.min(spawnIdx+SPAWN_RATE*2, spawnPts.length);
+  const s=spawnInvZoom;
   for(let i=spawnIdx;i<end;i+=2)
-    spawnTextInk(spawnCx+spawnPts[i], spawnCy+spawnPts[i+1], spawnLife);
+    spawnTextInk(spawnCx+spawnPts[i]*s, spawnCy+spawnPts[i+1]*s, spawnLife);
   spawnIdx=end;
 }
 function speak(text, now){
   if(!text) return;
   const fontPx=Math.max(14, Math.min(20, W*0.015));
   const g=glyphPoints(text, fontPx);
-  const cell=emptiestCell();
-  const cx=Math.max(g.w*0.5+10, Math.min(W-g.w*0.5-10, cell.x));
-  const cy=Math.max(g.h*0.5+10, Math.min(H-g.h*0.5-10, cell.y));
-  // store the spawn queue — particles born gradually over the next ~10 frames
-  spawnPts=g.pts; spawnCx=cx; spawnCy=cy;
-  spawnLife=16000; spawnIdx=0;
+  buildOccupancy(now);                     // refresh the grid only when we place
+  const cell=emptiestCell();               // screen-space placement
+  const sx=Math.max(g.w*0.5+10, Math.min(W-g.w*0.5-10, cell.x));
+  const sy=Math.max(g.h*0.5+10, Math.min(H-g.h*0.5-10, cell.y));
+  // remember this placement so the next few lines steer clear (overlap guard)
+  recentLines.push({sx, sy, until: now+spawnLifeFor()});
+  // screen centre → world centre; glyph offsets divided by zoom at spawn time
+  spawnCx=screenToWorldX(sx); spawnCy=screenToWorldY(sy); spawnInvZoom=1/cam.zoom;
+  spawnPts=g.pts; spawnLife=spawnLifeFor(); spawnIdx=0;
   lastAdvance=now; voiceBusyUntil=now+spawnLife;
   jitterSeed+=1.7;
 }
-function sayNow(text){ speak(text, performance.now()); }
+function spawnLifeFor(){ return 16000; }
+function sayNow(text){ spoken.set(text, performance.now()); speak(text, performance.now()); }
+// no line repeats inside this window — the deck feels deep, never loops audibly
+const NO_REPEAT_MS = 12*60*1000;     // ~12 minutes
+const QUIET_AFTER  = 9000;           // dwell in silence after a line resolves
+const spoken = new Map();            // text → last-spoken timestamp
 function advanceVoice(now){
-  if(now-lastAdvance < 5200) return;
-  if(now<voiceBusyUntil) return;             // don't speak over a line still resolving
-  if(Math.hypot(dot.vx,dot.vy)>9) return;    // wait for a quiet beat
-  si++;
-  // at the end of the deck, reshuffle and start again — the world never goes silent
-  if(si>=script.length){ shuffle(script); si=0; }
-  speak(script[si], now);
+  if(now-lastAdvance < 12000) return;          // base cadence: rarer than before
+  if(now < voiceBusyUntil + QUIET_AFTER) return;  // let the white breathe after a line
+  if(Math.hypot(dot.vx,dot.vy)>9) return;      // wait for a quiet beat
+  // walk the deck for the next line not spoken within the no-repeat window
+  for(let tries=0; tries<script.length; tries++){
+    si++;
+    if(si>=script.length){ shuffle(script); si=0; }
+    const line=script[si];
+    const last=spoken.get(line);
+    if(last===undefined || now-last > NO_REPEAT_MS){
+      spoken.set(line, now);
+      speak(line, now);
+      return;
+    }
+  }
+  // every line spoken recently — stay silent this round
 }
 
 /* ---- render ---- */
@@ -657,35 +770,38 @@ function buildBatches(){
 function drawInk(){
   bCount.fill(0); // reset counts — reuse the pre-allocated coord arrays
   const pulseBase=fieldT*12;
-  const n=ink.length;
+  const n=count;
   let hasText=false;
   const INV_AMAX_AB=AB/AMAX;
+  const invZ=1/cam.zoom;            // streak coords are world; keep widths screen-stable
   for(let i=0;i<n;i++){
-    const p=ink[i];
-    if(p.txtInit && p.txt>0.85){ hasText=true; continue; }
-    const f=p.f;
+    const ti=txtInit_[i], tx=txt_[i];
+    if(ti && tx>0.85){ hasText=true; continue; }
+    const f=f_[i];
     let a, w;
-    if(p.txtInit){
+    if(ti){
       const aText=AMAX*Math.min(1,(1-f)*2.4)*Math.min(1,f*10+0.12);
       const aInk=(1-f)*0.55;
-      a=lerp(aInk,aText,p.txt);
-      w=lerp(p.mass*1.3*(1-f*0.7),1.5,p.txt);
+      a=aInk+(aText-aInk)*tx;
+      const wInk=mass_[i]*1.3*(1-f*0.7);
+      w=wInk+(1.5-wInk)*tx;
     } else {
       a=(1-f)*0.55;
-      w=p.mass*1.3*(1-f*0.7);
+      w=mass_[i]*1.3*(1-f*0.7);
     }
-    a*=0.85+0.15*Math.sin(pulseBase+p.seed);
+    a*=0.85+0.15*Math.sin(pulseBase+seed_[i]);
     if(a<0.012) continue;
     let ab=(a*INV_AMAX_AB)|0; if(ab>=AB)ab=AB-1; if(ab<0)ab=0;
     let wb=Math.round(w-0.6); if(wb>=WB)wb=WB-1; if(wb<0)wb=0;
     const b=wb*AB+ab;
     const ci=bCount[b]*4;
     const coords=bCoords[b];
-    const dx=p.x-p.px, dy=p.y-p.py;
+    const X=x_[i],Y=y_[i],PX=px_[i],PY=py_[i];
+    const dx=X-PX, dy=Y-PY;
     if(dx*dx+dy*dy<0.25){
-      coords[ci]=p.x-0.4; coords[ci+1]=p.y; coords[ci+2]=p.x+0.4; coords[ci+3]=p.y;
+      coords[ci]=X-0.4; coords[ci+1]=Y; coords[ci+2]=X+0.4; coords[ci+3]=Y;
     } else {
-      coords[ci]=p.px; coords[ci+1]=p.py; coords[ci+2]=p.x; coords[ci+3]=p.y;
+      coords[ci]=PX; coords[ci+1]=PY; coords[ci+2]=X; coords[ci+3]=Y;
     }
     bCount[b]++;
   }
@@ -693,7 +809,7 @@ function drawInk(){
   for(let b=0;b<AB*WB;b++){
     const cnt=bCount[b]; if(!cnt) continue;
     const coords=bCoords[b];
-    ctx.globalAlpha=bAlpha[b]; ctx.lineWidth=bWidth[b];
+    ctx.globalAlpha=bAlpha[b]; ctx.lineWidth=bWidth[b]*invZ;
     ctx.beginPath();
     for(let j=0,ci=0;j<cnt;j++,ci+=4){
       ctx.moveTo(coords[ci],coords[ci+1]);
@@ -705,14 +821,14 @@ function drawInk(){
   // text-ink pass: crisp filled discs while still legible (txt > 0.85)
   if(hasText){
     ctx.fillStyle=INK;
+    const rr=0.75*invZ;
     for(let i=0;i<n;i++){
-      const p=ink[i];
-      if(!p.txtInit||p.txt<=0.85) continue;
-      const f=p.f;
+      if(!txtInit_[i]||txt_[i]<=0.85) continue;
+      const f=f_[i];
       const a=AMAX*Math.min(1,(1-f)*2.4)*Math.min(1,f*10+0.12);
       if(a<0.02) continue;
       ctx.globalAlpha=a;
-      ctx.beginPath(); ctx.arc(p.x,p.y,0.75,0,7); ctx.fill();
+      ctx.beginPath(); ctx.arc(x_[i],y_[i],rr,0,7); ctx.fill();
     }
     ctx.globalAlpha=1;
   }
@@ -721,15 +837,18 @@ function drawInk(){
 /* ---- loop ---- */
 let acc=0, last=0, shedRemainder=0;
 function stepDot(dt){
-  // the point eases toward the cursor — your position has a little weight
+  // the point eases toward the cursor (in world space) — your position has weight
   const tx = mouse.inside?mouse.x:dot.x, ty = mouse.inside?mouse.y:dot.y;
   dot.px=dot.x; dot.py=dot.y;
   dot.x += (tx-dot.x)*0.22;
   dot.y += (ty-dot.y)*0.22;
   dot.vx=dot.x-dot.px; dot.vy=dot.y-dot.py;
-  // shed ink in proportion to how fast you move — stillness leaves nothing
-  const sp=Math.hypot(dot.vx,dot.vy);
-  shedRemainder += sp*0.5;
+  // shed ink in proportion to ON-SCREEN speed — world speed × zoom. This LOD is
+  // what stops the particle count exploding when zoomed in: a fast world-space
+  // move covers few screen pixels when zoomed out (shed little) and many when
+  // zoomed in, but we divide the rate back by zoom so screen density is steady.
+  const sp=Math.sqrt(dot.vx*dot.vx+dot.vy*dot.vy)*cam.zoom;
+  shedRemainder += (sp*0.5)/cam.zoom;
   const n=Math.floor(shedRemainder); shedRemainder-=n;
   if(n>0) shed(dot.x,dot.y, Math.min(n,12), dot.vx, dot.vy);
 }
@@ -739,15 +858,20 @@ function frame(now){
   acc+=dt;
   const STEP=16.67;
   stepTheme(dt);
+  stepCam(dt);
   INK = inkColor();
   fieldT += dt*0.00018;
   bakeField();
   while(acc>=STEP){ stepDot(STEP); stepEvents(STEP); stepInk(STEP); acc-=STEP; }
   maybeEvent(dt);
   drainSpawnQueue();   // bleed out queued text particles: ~10 frames, no spike
-  buildOccupancy();
-  advanceVoice(now);
+  advanceVoice(now);   // builds the occupancy grid lazily, only when placing a line
+  // background fills the whole screen under the identity (DPR-only) transform…
+  ctx.setTransform(DPR,0,0,DPR,0,0);
   ctx.fillStyle=bgColor(); ctx.fillRect(0,0,W,H);
+  // …then the world is drawn under the camera transform (world → screen → device)
+  const z=cam.zoom*DPR;
+  ctx.setTransform(z,0,0,z, -cam.x*z, -cam.y*z);
   drawInk();
   drawDot();
   requestAnimationFrame(frame);
@@ -757,8 +881,16 @@ let INK='#111';
 /* ---- input: the dot follows the cursor; SPACE / click changes the field-state ---- */
 function pos(e){
   const t = e.touches ? e.touches[0] : e;
-  mouse.x=t.clientX; mouse.y=t.clientY; mouse.inside=true;
+  mouse.sx=t.clientX; mouse.sy=t.clientY;
+  mouse.x=screenToWorldX(mouse.sx); mouse.y=screenToWorldY(mouse.sy);
+  mouse.inside=true;
 }
+// scroll to zoom toward the cursor (trackpad pinch arrives as ctrl+wheel)
+cv.addEventListener('wheel',(e)=>{
+  e.preventDefault();
+  const factor = Math.exp(-e.deltaY*(e.ctrlKey?0.01:0.0016));
+  zoomAt(e.clientX, e.clientY, factor);
+},{passive:false});
 window.addEventListener('mousemove',pos);
 cv.addEventListener('mouseleave',()=>{mouse.inside=false;});
 cv.addEventListener('mouseenter',()=>{mouse.inside=true;});

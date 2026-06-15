@@ -10,3 +10,4 @@ Desktop.ini
 .env*
 !.env.example
 node_modules/
+.og-frames/

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Lines of Flight favicon: a swirl of black ink rotating on paper.
+       Animated via SMIL (Firefox/Safari animate; Chrome shows frame 0).
+       Two counter-rotating spiral arms + a still centre dot (Stillpoint). -->
+  <rect width="32" height="32" fill="#FAFAF8"/>
+  <g transform="translate(16 16)" fill="none" stroke="#111" stroke-linecap="round">
+    <!-- outer spiral arm -->
+    <path d="M 0 -11 A 11 11 0 0 1 9.5 5.5 A 7.5 7.5 0 0 0 -3 -6.8 A 4.5 4.5 0 0 1 2.5 2.5"
+          stroke-width="2.2" opacity="0.92">
+      <animateTransform attributeName="transform" type="rotate"
+        from="0" to="360" dur="6s" repeatCount="indefinite"/>
+    </path>
+    <!-- inner counter-arm, lighter, slower -->
+    <path d="M 0 -6 A 6 6 0 0 1 5 3 A 3.2 3.2 0 0 0 -1.5 -2.6"
+          stroke-width="1.6" opacity="0.55">
+      <animateTransform attributeName="transform" type="rotate"
+        from="360" to="0" dur="9s" repeatCount="indefinite"/>
+    </path>
+  </g>
+  <!-- Stillpoint: the dot that does not move -->
+  <circle cx="16" cy="16" r="1.8" fill="#111"/>
+</svg>
