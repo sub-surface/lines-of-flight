@@ -15,3 +15,6 @@ node_modules/
 # local DevTools perf captures
 Trace-*.json/
 Trace-*.json
+
+# spike build artifact (regenerate via spike/build-wasm.mjs)
+spike/integrate.wasm
