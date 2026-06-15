@@ -43,10 +43,37 @@
       border:0; padding:3px 0; margin:0 0 0 auto; font:inherit; text-decoration:none;
       cursor:pointer; opacity:.75; transition:opacity .25s ease; text-align:right;}
   #ui .panel a:hover, #ui .panel button:hover{opacity:1;}
+
+  /* the boot veil: a quiet landing that lets the field warm up behind it.
+     Not a loading screen — the sim is already alive underneath; this just gives
+     it a few seconds to breathe, then dissolves. Same paper as the world. */
+  #boot{position:fixed; inset:0; z-index:20; background:#FAFAF8;
+        display:flex; align-items:center; justify-content:center; cursor:default;
+        transition:opacity 1.6s ease; opacity:1;}
+  #boot.lift{opacity:0; pointer-events:none;}
+  #boot .lines{font:400 clamp(15px,2.2vw,21px)/2.1 Georgia,"EB Garamond","Times New Roman",serif;
+        color:#3A3A38; text-align:center; max-width:32ch; padding:0 8vw;}
+  #boot .lines span{display:block; opacity:0; transition:opacity 1.1s ease;}
+  #boot .lines span.in{opacity:1;}
+  #boot .enter{position:absolute; bottom:11vh; left:0; right:0; text-align:center;
+        font:400 13px/1.5 Georgia,"EB Garamond",serif; color:#9a9a96;
+        opacity:0; transition:opacity 1.1s ease;}
+  #boot .enter.in{opacity:.8;}
+  @media (prefers-reduced-motion: reduce){
+    #boot, #boot .lines span, #boot .enter{transition:none;}
+  }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+<div id="boot" aria-label="entering">
+  <p class="lines">
+    <span>A black dot on a white that does not end.</span>
+    <span>Move, and a line leaves you behind.</span>
+    <span>It will not stay. Watch it become weather.</span>
+  </p>
+  <div class="enter">— move, or touch, to begin —</div>
+</div>
 <nav id="ui" aria-label="controls">
   <span class="mark" aria-hidden="true"></span>
   <div class="panel">
@@ -1022,6 +1049,56 @@ function runBench(){
 /* ---- go ---- */
 if(BENCH) runBench();
 else { buildBatches(); resize(); prewarmVoices(); placeDot(); setBeat(0); requestAnimationFrame(frame); }
+
+/* ---- the boot veil ----
+   A minimal landing. The sim above already started in `go`, so behind this veil
+   the field is baking, the glyph cache is warming, and the first ambient events
+   and voice are spawning weather — by the time it lifts, the world is already
+   alive rather than blank. The veil reveals three lines, invites you in, then
+   dissolves on your first move (or after a gentle max dwell). It is never a gate:
+   any input lifts it, and we cap the wait so no one is held. */
+(function boot(){
+  if(BENCH) return;                       // measurement runs bare
+  const veil = document.getElementById('boot');
+  if(!veil) return;
+  const spans = veil.querySelectorAll('.lines span');
+  const enter = veil.querySelector('.enter');
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let lifted=false;
+  function lift(){
+    if(lifted) return; lifted=true;
+    veil.classList.add('lift');
+    // remove from the DOM after the fade so it never intercepts a later event
+    setTimeout(()=>veil.remove(), 1700);
+    cleanup();
+  }
+  const onInput=()=>lift();
+  function cleanup(){
+    window.removeEventListener('mousemove',onInput);
+    window.removeEventListener('keydown',onInput);
+    window.removeEventListener('wheel',onInput);
+    veil.removeEventListener('click',onInput);
+    veil.removeEventListener('touchstart',onInput);
+  }
+
+  if(reduce){                             // no staged fades — show all, lift on input
+    spans.forEach(s=>s.classList.add('in')); enter.classList.add('in');
+  } else {
+    // stagger the lines in, then the invitation — the warm-up window
+    spans.forEach((s,i)=> setTimeout(()=>s.classList.add('in'), 400 + i*1200));
+    setTimeout(()=>enter.classList.add('in'), 400 + spans.length*1200 + 400);
+  }
+
+  // lift on the first real intent…
+  window.addEventListener('mousemove',onInput,{once:true});
+  window.addEventListener('keydown',onInput,{once:true});
+  window.addEventListener('wheel',onInput,{passive:true,once:true});
+  veil.addEventListener('click',onInput,{once:true});
+  veil.addEventListener('touchstart',onInput,{once:true,passive:true});
+  // …or after a gentle max dwell, so an idle visitor still arrives in the world
+  setTimeout(lift, reduce ? 2500 : 400 + spans.length*1200 + 2400);
+})();
 </script>
 </body>
 </html>
