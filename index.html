@@ -436,17 +436,135 @@ let jitterSeed=0;   // nudged each time we place a line, so placement varies
    breathing in the field. When the line's time is up, the hold releases and the
    field carries the letters off as weather. The voice is the same matter as
    everything else — diegetic, never a UI layer. */
-const script = [
+// Fisher-Yates shuffle
+function shuffle(arr){ for(let i=arr.length-1;i>0;i--){ const j=(Math.random()*(i+1))|0; [arr[i],arr[j]]=[arr[j],arr[i]]; } return arr; }
+const script = shuffle([
+  // --- the world's own voice ---
   "A dot. A white that does not end.",
   "Move, and you leave a little of yourself behind.",
   "It will not stay. Watch it become weather.",
-  "“You found out you could move.”",
-  "“There is no beginning or end; there is only the middle.”",
-  "“To flee is not to escape, but to create a path.”",
-  "“The self is only a threshold, a door, a passage.”",
+  "Still. And already it is going.",
+  "The white is not empty. It is waiting.",
+  "You are always in the middle of something.",
+  "What you shed becomes the world’s hair.",
+  "Go on. I’ll be the place you went from.",
+  // --- A Thousand Plateaus ---
+  "“A line of flight is not made of two points.”",
+  "“It passes between points, comes up through the middle.”",
+  "“Between things does not designate a relation but a direction.”",
+  "“Write to the nth power, the n−1 power… subtract the unique.”",
+  "“A rhizome has no beginning or end; it is always in the middle.”",
+  "“Lodge yourself on a stratum, experiment with opportunities it offers.”",
+  "“Find an advantageous place on it, find potential movements of deterritorialization.”",
+  "“Experiment, never interpret.”",
+  "“All identity is simulation.”",
+  "“The middle is by no means an average; it is where things pick up speed.”",
+  "“The painter does not paint on a white surface. The surface is already full of clichés.”",
+  "“Smooth space is occupied by intensities, winds, noises, tactile qualities, and above all by a line of flight.”",
+  "“Striated space is defined by the requirements of long-distance vision: constancy of orientation.”",
+  "“Nomads have no history; they only have a geography.”",
+  "“To be present at the birth of a world.”",
+  "“Lines of flight are realities. They are the concern of the geographer.”",
+  "“Becoming is certainly not imitating, or identifying with something.”",
+  "“Becoming is a verb with a consistency all its own.”",
+  "“To become is not to attain a form but to find the zone of proximity.”",
+  "“The self is only a threshold, a door, a becoming between two multiplicities.”",
+  "“There are only relations of movement and rest between unformed elements.”",
+  "“A body is not defined by its form, nor its functions, but by longitude and latitude.”",
+  "“Longitude is the set of relations of motion and rest between its particles.”",
+  "“Latitude is the set of affects it is capable of at a given power.”",
+  "“Only affects and local movements. Only intensities.”",
+  "“You have to keep enough of the organism for it to reform each dawn.”",
+  "“Don’t become a black hole. A line of flight must not become a line of death.”",
+  "“The plane of consistency is matter without form, the unformed.”",
+  "“An assemblage is precisely this increase in the dimensions of a multiplicity.”",
+  "“When a multiplicity is taken up in a structure its growth is offset by a reduction.”",
+  "“If you don’t have a territory, you can’t have a line of flight.”",
+  "“A haecceity has no beginning or end, origin or destination.”",
+  "“It is always between.”",
+  "“Refrain: a little tune one hums as one enters the dark.”",
+  "“The refrain marks a territory, keeps chaos at arm’s length.”",
+  "“Chaos is not the opposite of rhythm, but the milieu of all milieus.”",
+  "“The forces of chaos are kept outside as much as possible.”",
+  "“Or the forces of chaos are turned into something—weather.”",
+  "“A clandestine passenger on a motionless voyage.”",
+  "“To become imperceptible oneself, to have dismantled love in order to become capable of loving.”",
+  "“To have dismantled one’s self in order finally to be alone… and meet the true double at the other end of the line.”",
+  // --- Difference and Repetition ---
+  "“Something in the world forces us to think.”",
+  "“This something is an object not of recognition but of a fundamental encounter.”",
+  "“Repetition is never the same thing twice; it always differs.”",
+  "“Difference in itself. Repetition for itself.”",
+  "“The eternal return is not the same, but the return of difference.”",
+  "“Everything that can be affirmed returns; only the negative is excluded.”",
+  "“The new is always produced in conditions that don’t yet exist.”",
+  "“It is not being that returns but rather returning itself that constitutes being.”",
+  "“Difference is the condition for repetition.”",
+  "“There is no resemblance in intensity. Intensity is always and essentially a difference.”",
+  // --- Logic of Sense ---
+  "“There is always another breath in my breath, another thought in my thought.”",
+  "“A thousand beings implicated in my complications.”",
+  "“Every true thought is an aggression.”",
+  "“Events are not things or facts. They are pure becomings, always already past and yet to come.”",
+  "“The event is co-extensive with becoming.”",
+  "“Sense is always produced: it is never originary.”",
+  "“The surface is the locus of sense.”",
+  // --- What is Philosophy? ---
+  "“Philosophy consists not in knowing and is not inspired by truth.”",
+  "“Art, science, philosophy are creative. That’s all.”",
+  "“A concept is not a proposition, it does not refer to a state of things.”",
+  "“Concepts are events.”",
+  "“The philosopher creates, he does not reflect.”",
+  "“Thought touches chaos—it thinks chaos.”",
+  "“Chaos—in which the infinite speeds of the movements that have no consistency or reference—.”",
+  "“A concept is a contraction.”",
+  // --- Negotiations ---
+  "“The notions of relevance, necessity, the point of something—a thousand times more significant than truth.”",
+  "“What a relief to have nothing to say.”",
+  "“The right to say nothing—only then is there a chance of framing the rare thing worth saying.”",
+  "“Provide gaps of solitude and silence in which something might be found.”",
+  "“Repressive forces don’t stop people expressing themselves but force them to.”",
+  // --- Dialogues (with Parnet) ---
+  "“A conversation is never between two people; there are always two and a half… and more.”",
+  "“Fleeing is not a renunciation of action; there is nothing more active than a line of flight.”",
+  "“Write, form a rhizome, extend the line of flight.”",
+  "“The tree imposes the verb to be, but the rhizome is woven of conjunctions: and… and… and…”",
+  "“To think is always to follow a witch’s line.”",
+  // --- Francis Bacon: The Logic of Sensation ---
+  "“The shadow escapes from the body like an animal we had been sheltering.”",
+  "“A sensation is the action of invisible forces on the body.”",
+  "“Figure: the body without organs. Not the absence of organs but their uncertain presence.”",
+  "“The painter does not paint on a white surface. The surface is already full.”",
+  "“To paint is to rid the surface of its clichés and to allow a new force to emerge.”",
+  // --- The Fold: Leibniz and the Baroque ---
+  "“The world is an infinite series of curvatures or inflections.”",
+  "“Always folded within a fold, like a cavern in a cavern.”",
+  "“The fold is the differentiator of difference, and it does not depend on two things.”",
+  "“The monad has no windows through which something might enter or leave.”",
+  // --- Anti-Oedipus ---
+  "“It is at work everywhere, functioning smoothly at times, in fits and starts at others.”",
+  "“It breathes, it heats, it eats.”",
+  "“Everywhere it is machines driving other machines, with all the necessary couplings.”",
+  "“The unconscious is not a theater but a factory.”",
+  // --- Spinoza (through Deleuze) ---
+  "“We do not yet know what the body is capable of.”",
+  "“Affect is not a feeling; it is the passage from one power to another.”",
+  "“Power is always the power to be affected.”",
+  "“Joy is the passage to greater power; sadness is the passage to lesser.”",
+  // --- Blanchot (through Deleuze) ---
+  "“Writing has nothing to do with signifying; it has to do with surveying, mapping, even realms yet to come.”",
+  "“The writer is a sorcerer, one who makes a pact with a becoming.”",
+  // --- Bergson (through Deleuze) ---
+  "“Duration is the moving image of eternity.”",
+  "“The past is not behind us. It is the ground on which we stand.”",
+  "“Memory is not the recollection of the past; it is the coexistence of all degrees of the past.”",
+  // --- the game's own endings ---
   "“Everything you make, the air will take.”",
-  "“Make it anyway. I'll be the place you went from.”",
-];
+  "“Make it anyway.”",
+  "“I’ll be the place you went from.”",
+  "You found out you could move.",
+  "I always knew you’d find out.",
+]);
 // offscreen rasteriser, reused
 const gcv=document.createElement('canvas'), gctx=gcv.getContext('2d');
 function glyphPoints(text, fontPx){
@@ -484,11 +602,13 @@ function speak(text, now){
 }
 function sayNow(text){ speak(text, performance.now()); }
 function advanceVoice(now){
-  if(si>=script.length-1) return;
   if(now-lastAdvance < 5200) return;
   if(now<voiceBusyUntil) return;             // don't speak over a line still resolving
   if(Math.hypot(dot.vx,dot.vy)>9) return;    // wait for a quiet beat
-  si++; speak(script[si], now);
+  si++;
+  // at the end of the deck, reshuffle and start again — the world never goes silent
+  if(si>=script.length){ shuffle(script); si=0; }
+  speak(script[si], now);
 }
 
 /* ---- render ---- */
