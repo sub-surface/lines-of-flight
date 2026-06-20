@@ -171,23 +171,47 @@ const sources = [];   // {x,y,A,B,r2,shiver}
 let globalFlow = {x:0, y:0};
 let fieldT = 0;       // field's own slow clock (advances each step)
 
-// cheap value-noise via summed sines — smooth, seamless, no tables
+// cheap value-noise via summed sines — smooth, seamless, no tables.
+// Still used by the shiver sources (high-frequency turbulence where the analytic
+// path below would be no cheaper). The curl BASE no longer calls this — see
+// curlBase().
 function noise2(x,y,t){
   return Math.sin(x*0.0042 + t*0.6) * Math.cos(y*0.0051 - t*0.4)
        + 0.5*Math.sin((x+y)*0.0033 - t*0.9)
        + 0.5*Math.cos((x-y)*0.0037 + t*0.7);
 }
+// ---- analytic curl of the noise base ----
+// The old base took the curl of noise2 by FINITE DIFFERENCE: 4 noise2 calls
+// (y±e, x±e) per grid node → 16 trig ops, plus an e=2.0 discretisation error.
+// But noise2 is pure sinusoids, so its curl is known in CLOSED FORM. Writing
+//   n = sin(X)cos(Y) + ½sin(P) + ½cos(Q),
+//   X=ax+ft, Y=by−gt, P=c(x+y)−ht, Q=d(x−y)+it
+// the curl base (∂n/∂y·22, −∂n/∂x·22) needs only sin/cos of X,Y,P,Q — 6 trig
+// per node, exact (no finite-difference blur), ~2.7× fewer transcendentals on
+// the bake's dominant cost. Writes the curl velocity into ofx/ofy.
+const NA=0.0042, NB=0.0051, NC=0.0033, ND=0.0037;       // spatial freqs
+const NFT=0.6, NGT=0.4, NHT=0.9, NIT=0.7;               // temporal freqs
+function curlBase(x,y,t){
+  const X=x*NA + t*NFT, Y=y*NB - t*NGT, P=(x+y)*NC - t*NHT, Q=(x-y)*ND + t*NIT;
+  const sX=Math.sin(X), cX=Math.cos(X), sY=Math.sin(Y), cY=Math.cos(Y);
+  const cP=Math.cos(P), sQ=Math.sin(Q);
+  // ∂n/∂y =  sX·(−sY)·NB + ½cP·NC + ½(−sQ)·(−ND)
+  // ∂n/∂x =  cX·NA·cY    + ½cP·NC + ½(−sQ)·ND
+  const dndy = -sX*sY*NB + 0.5*cP*NC + 0.5*sQ*ND;
+  const dndx =  cX*NA*cY + 0.5*cP*NC - 0.5*sQ*ND;
+  ofx =  dndy*22;
+  ofy = -dndx*22;
+}
 // velocity at a point, written into the shared out-vector [ofx,ofy] to avoid
 // allocating per call. Used to BAKE the coarse field grid (a few hundred calls
 // per frame) — never per particle. Per-particle sampling is sampleField() below.
 let ofx=0, ofy=0;
-function evalField(x,y){
-  const t=fieldT, e=2.0;
-  // curl of scalar noise: (∂n/∂y, -∂n/∂x) → divergence-free, looks like flow
-  const nx1=noise2(x,y+e,t), nx2=noise2(x,y-e,t);
-  const ny1=noise2(x+e,y,t), ny2=noise2(x-e,y,t);
-  let vx=(nx1-nx2)*22 + globalFlow.x, vy=-(ny1-ny2)*22 + globalFlow.y;
-  
+// the source + gust contribution at a point, written into ofx/ofy as the PURE
+// source velocity (base NOT included). Callers add it to whatever base they
+// computed. Split out so the separable bake can add sources without recomputing
+// the base. Identical math to the old inline loop.
+function evalSources(x,y,t){
+  let vx=0, vy=0;
   // Add active gusts from events
   for(let i=0; i<events.length; i++){
     if(events[i].gust && events[i].vxFlow){
@@ -195,26 +219,54 @@ function evalField(x,y){
       vy += events[i].vyFlow;
     }
   }
-  
   for(let i=0;i<sources.length;i++){
     const s=sources[i];
     if(s.gust) continue; // handled above as global flow
+    // bl = the source's blend envelope (0→1), so beats ease in/out instead of
+    // snapping. Events leave bl undefined → full strength, behaviour unchanged.
+    const bl = s.bl !== undefined ? s.bl : 1;
+    if(s.lane){
+      // ---- striated space: a ruled directional flow ----
+      // A laminar drift along (dirx,diry), GATED by a sine across the
+      // perpendicular axis: sin>0 → flow runs forward in this channel, sin<0 →
+      // it reverses in the next. The zero-crossings are the "walls" between
+      // lanes — smooth WITHIN a channel, striated BETWEEN them. No sqrt; the one
+      // sin goes through the existing LUT so it stays off the transcendental path.
+      // freq 0 → an ungated uniform drift (the "current"); otherwise the sine
+      // across the perpendicular axis carves the channels. The +1 bias keeps the
+      // lane flow one-directional within a channel (a drift that reverses each
+      // band) rather than a symmetric ±; tune `bias` per beat if needed.
+      const g = s.freq ? lutSin(x*s.ny*s.freq - y*s.nx*s.freq + s.phase) : 1;
+      vx += s.dirx * s.speed * g * bl;
+      vy += s.diry * s.speed * g * bl;
+      continue;
+    }
     const dx=x-s.x, dy=y-s.y;
     const d2=dx*dx+dy*dy;
     const denom=1/(d2+s.r2); // single reciprocal, zero square roots!
-    
+
     if(s.shiver){
-      vx += (noise2(x*9,y*9,t*7))*30*denom*s.r2;
-      vy += (noise2(y*9,x*9,t*7))*30*denom*s.r2;
+      const sh=30*denom*s.r2*bl;
+      vx += (noise2(x*9,y*9,t*7))*sh;
+      vy += (noise2(y*9,x*9,t*7))*sh;
     } else {
       // s.A = radial strength (sink/source), s.B = rotational strength (vortex)
-      const A = s.currA !== undefined ? s.currA : s.A;
-      const B = s.currB !== undefined ? s.currB : s.B;
+      const A = (s.currA !== undefined ? s.currA : s.A) * bl;
+      const B = (s.currB !== undefined ? s.currB : s.B) * bl;
       vx += (A * dx + B * dy) * denom;
       vy += (A * dy - B * dx) * denom;
     }
   }
   ofx=vx; ofy=vy;
+}
+// full field at an arbitrary point (base + globalFlow + sources). Used by any
+// off-grid caller and as the reference the separable bake is validated against.
+function evalField(x,y){
+  const t=fieldT;
+  curlBase(x,y,t);                 // loads ofx/ofy with the curl base
+  const bx=ofx+globalFlow.x, by=ofy+globalFlow.y;
+  evalSources(x,y,t);              // ofx/ofy ← pure source contribution
+  ofx+=bx; ofy+=by;                // base + sources
 }
 
 /* ---- baked field grid ----
@@ -226,20 +278,75 @@ function evalField(x,y){
 const FCELL=36;
 const INV_FCELL = 1 / FCELL;
 let FCOLS=0, FROWS=0, fvx=null, fvy=null;
+// per-axis trig scratch for the separable curl bake (see bakeField). Sized to
+// the grid; reallocated with it. The curl's x-dependent trig takes only FCOLS
+// distinct values and its y-dependent trig only FROWS — so we compute each axis
+// ONCE per frame, not once per node.
+let cxA=null,sxA=null,cxC=null,sxC=null,cxD=null,sxD=null;   // per-column (x)
+let cyB=null,syB=null,cyP=null,syP=null,cyQ=null,syQ=null;   // per-row (y)
 function allocField(){
   FCOLS=Math.ceil(W*INV_FCELL)+2; FROWS=Math.ceil(H*INV_FCELL)+2;
   fvx=new Float32Array(FCOLS*FROWS); fvy=new Float32Array(FCOLS*FROWS);
+  cxA=new Float32Array(FCOLS); sxA=new Float32Array(FCOLS);
+  cxC=new Float32Array(FCOLS); sxC=new Float32Array(FCOLS);
+  cxD=new Float32Array(FCOLS); sxD=new Float32Array(FCOLS);
+  cyB=new Float32Array(FROWS); syB=new Float32Array(FROWS);
+  cyP=new Float32Array(FROWS); syP=new Float32Array(FROWS);
+  cyQ=new Float32Array(FROWS); syQ=new Float32Array(FROWS);
 }
 // Grid node (i,j) covers the WORLD coord under screen pixel ((i-0.5)*FCELL,…).
 // At zoom z, one screen cell = FCELL px = FCELL/z world units, so the whole
 // grid spans the visible world rect. Cost is independent of zoom.
+//
+// SEPARABLE CURL BAKE. The curl base needs sin/cos of
+//   X=NA·x+NFT·t,  Y=NB·y−NGT·t,  P=NC·(x+y)−NHT·t,  Q=ND·(x−y)+NIT·t.
+// X depends only on the column, Y only on the row. P and Q mix x and y, but
+// angle-addition splits them: e.g. sin(P)=sin(Px)cos(Py)+cos(Px)sin(Py) with
+// Px=NC·x, Py=NC·y−NHT·t. So we precompute, per column, {sin,cos} of NA·x, NC·x,
+// ND·x; and per row, {sin,cos} of (NB·y−NGT·t), (NC·y−NHT·t), (ND·y+NIT·t). The
+// inner loop then forms each node's curl from those tables with only multiplies
+// and adds — the ~3600 trig/frame the analytic bake still did collapse to
+// ~FCOLS·3 + FROWS·3 ≈ 180 trig/frame, computed once in the setup pass.
 function bakeField(){
   const wcell = FCELL/cam.zoom;          // world units per grid cell
+  const t=fieldT;
+  // X carries +NFT·t; fold the time phase into the per-column angle.
+  const tX=t*NFT, tCx=0, tDx=0;          // P,Q time phases live on the row side
+  for(let i=0;i<FCOLS;i++){
+    const x=cam.x + (i-0.5)*wcell;
+    const ax=x*NA+tX, cx=x*NC, dx=x*ND;
+    cxA[i]=Math.cos(ax); sxA[i]=Math.sin(ax);
+    cxC[i]=Math.cos(cx); sxC[i]=Math.sin(cx);
+    cxD[i]=Math.cos(dx); sxD[i]=Math.sin(dx);
+  }
+  const tP=-t*NHT, tQ=t*NIT, tY=-t*NGT;
   for(let j=0;j<FROWS;j++){
     const y=cam.y + (j-0.5)*wcell;
+    const by=y*NB+tY, py=y*NC+tP, qy=-y*ND+tQ;   // Q=ND(x−y)+NIT·t → y term is −ND·y
+    cyB[j]=Math.cos(by); syB[j]=Math.sin(by);
+    cyP[j]=Math.cos(py); syP[j]=Math.sin(py);
+    cyQ[j]=Math.cos(qy); syQ[j]=Math.sin(qy);
+  }
+  const hasSources = sources.length>0 || events.length>0;
+  for(let j=0;j<FROWS;j++){
+    const y=cam.y + (j-0.5)*wcell;
+    const cB=cyB[j],sB=syB[j], cP=cyP[j],sP=syP[j], cQ=cyQ[j],sQ=syQ[j];
+    const row=j*FCOLS;
     for(let i=0;i<FCOLS;i++){
-      evalField(cam.x + (i-0.5)*wcell, y);
-      const o=j*FCOLS+i; fvx[o]=ofx; fvy[o]=ofy;
+      const sX=sxA[i],cX=cxA[i];
+      // sin(P)=sin(Px+Py)=sPx·cP+cPx·sP ; we need cos(P)=cos(Px+Py)=cPx·cP−sPx·sP
+      const cosP = cxC[i]*cP - sxC[i]*sP;
+      // sin(Q)=sin(Qx+Qy)=sQx·cQ+cQx·sQ , with Qx=ND·x
+      const sinQ = sxD[i]*cQ + cxD[i]*sQ;
+      const dndy = -sX*sB*NB + 0.5*cosP*NC + 0.5*sinQ*ND;
+      const dndx =  cX*NA*cB + 0.5*cosP*NC - 0.5*sinQ*ND;
+      let vx = dndy*22 + globalFlow.x, vy = -dndx*22 + globalFlow.y;
+      const o=row+i;
+      if(hasSources){
+        evalSources(cam.x + (i-0.5)*wcell, y, t);   // adds gusts + sources into ofx/ofy
+        vx+=ofx; vy+=ofy;
+      }
+      fvx[o]=vx; fvy[o]=vy;
     }
   }
 }
@@ -357,7 +464,7 @@ function stepInk(dt){
     }
     const grip=grip_[k];
     if(txtInit_[k]){
-      const txt = Math.max(0, Math.min(1, (0.75 - f) / 0.35)); txt_[k]=txt;
+      const txt = Math.max(0, Math.min(1, (TEXT.holdHi - f) / TEXT.holdSpan)); txt_[k]=txt;
       const release = f*f;
       let vx=vx_[k], vy=vy_[k];
       if(txt === 0){ txtInit_[k]=0; vx = ofx*sub*3.5; vy = ofy*sub*3.5; }
@@ -365,9 +472,9 @@ function stepInk(dt){
       vx += (ofx*sub - vx)*grip*fieldPull;
       vy += (ofy*sub - vy)*grip*fieldPull;
       if(txt > 0){
-        const kk = 0.22*(1-release)*txt;
+        const kk = TEXT.spring*(1-release)*txt;
         vx += (hx_[k]-x_[k])*kk; vy += (hy_[k]-y_[k])*kk;
-        const damping = 1+(0.78-1)*txt;
+        const damping = 1+(TEXT.damping-1)*txt;
         vx *= damping; vy *= damping;
       }
       const textDiff = (0.05+f*1.1)*release;
@@ -413,42 +520,115 @@ function stepInk(dt){
 /* ---- story beats: the field-state changes ----
    Press SPACE / → to move the world through states (← to go back).
    This is the spec's "region-dependent physics as a felt beat", in miniature.
-   Each beat may also name a `voice` line that surfaces when you enter it. */
+   Each beat may also name a `voice` line that surfaces when you enter it.
+
+   Beats are DATA, not imperative builders. A beat lists its sources via a `make`
+   factory that returns plain source descriptors with positions given as SCREEN
+   FRACTIONS (fx,fy) rather than baked world coords. Two consequences fall out:
+     • Re-centring — stepBeat re-projects (fx,fy) through the camera every step,
+       so a well stays centred after a resize or zoom instead of stranding.
+     • Eased transitions — entering a beat doesn't clear `sources`; the old beat's
+       sources fade their blend `bl` to 0 (and are culled at 0) while the new
+       ones rise from 0 to 1. The world *crosses* between states instead of
+       snapping. Events are untouched: they carry no `bl`/`frac`, so they run at
+       full strength exactly as before. */
 // world coord at a screen fraction, under the current camera — so beats centre
 // on what you're actually looking at, even when zoomed or panned.
 const vw=(fx)=>screenToWorldX(W*fx), vh=(fy)=>screenToWorldY(H*fy);
-const C=()=>({x:vw(0.5),y:vh(0.5)});
+const TAU=6.283185;
+const LANE_BIAS=1e6;   // keep lutSin's argument positive (see evalField lane branch)
+// a uniform drift, expressed as a lane with no perpendicular gating (freq 0 →
+// g=lutSin(phase) constant) would vary with phase; instead use a far-field source
+// so "current" eases like everything else. A single very-large-r2 source with
+// pure B≈0 and a directional A gives an almost-uniform push across the screen.
 const beats = [
   {name:'still', voice:"“A line of flight is not made of two points. It passes between points, it comes up through the middle.”",
-    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0; }},
+    make:()=>[]},
   {name:'well', voice:"“To flee is not to renounce action; there is nothing more active than a flight.”",
-    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
-                sources.push({x:vw(0.5), y:vh(0.5), A:-8000, B:0, r2:12100}); }},
+    make:()=>[{fx:0.5, fy:0.5, A:-8000, B:0, r2:12100}]},
   {name:'stone', voice:"“Lodge yourself on a stratum, experiment with the opportunities it offers, finding possible lines of flight.”",
-    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
-                sources.push({x:vw(0.5), y:vh(0.5), A:12000, B:0, r2:22500}); }},
+    make:()=>[{fx:0.5, fy:0.5, A:12000, B:0, r2:22500}]},
   {name:'orbit', voice:"“The self is only a threshold, a door, a becoming between two multiplicities.”",
-    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
-                sources.push({x:vw(0.5), y:vh(0.5), A:-2500, B:9000, r2:22500}); }},
+    make:()=>[{fx:0.5, fy:0.5, A:-2500, B:9000, r2:22500}]},
   {name:'vortex', voice:"“To become imperceptible, to make a line, to find your line of flight.”",
-    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
-                sources.push({x:vw(0.5), y:vh(0.5), A:-6000, B:10000, r2:22500}); }},
+    make:()=>[{fx:0.5, fy:0.5, A:-6000, B:10000, r2:22500}]},
   {name:'two', voice:"“We were never going to touch. We needed a between.”",
-    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
-                sources.push({x:vw(0.34), y:vh(0.5), A:0, B:10000, r2:40000});
-                sources.push({x:vw(0.66), y:vh(0.5), A:0, B:-10000, r2:40000}); }},
+    make:()=>[{fx:0.34, fy:0.5, A:0, B:10000, r2:40000},
+              {fx:0.66, fy:0.5, A:0, B:-10000, r2:40000}]},
+  // ---- striated space: ruled directional channels ----
+  {name:'striated', voice:"“Striated space: the requirement of long-distance vision, the constancy of orientation.”",
+    make:()=>[{lane:true, dirx:0, diry:1, nx:1, ny:0, freq:0.010, phase:LANE_BIAS, speed:30}]},
+  // ---- full striation: a crossed lattice the ink must thread ----
+  {name:'grid', voice:"“To striate, to grid, to make the smooth space measurable.”",
+    make:()=>[{lane:true, dirx:0, diry:1, nx:1, ny:0, freq:0.011, phase:LANE_BIAS, speed:24},
+              {lane:true, dirx:1, diry:0, nx:0, ny:1, freq:0.011, phase:LANE_BIAS, speed:24}]},
+  // ---- murmuration: a loose swarm of tiny swirls, slowly orbiting — no center ----
+  {name:'murmuration', voice:"“A loose scatter that drifts as one. No center, and going somewhere.”",
+    make:()=>{ const a=[]; const N=6;
+      for(let i=0;i<N;i++){ const ph=i/N*TAU;
+        a.push({fx:0.5, fy:0.5, A:0, B:(i&1?5200:-5200), r2:9000,
+                orbit:{rx:0.22, ry:0.16, ph, sp:0.00018+0.00003*i}}); }
+      return a; }},
+  // ---- chain: alternating beads in a row — the rhizome's "and… and… and" ----
+  {name:'chain', voice:"“And… and… and. The rhizome is woven of conjunctions.”",
+    make:()=>{ const a=[]; const N=4;
+      for(let i=0;i<N;i++) a.push({fx:0.5 + (i-(N-1)/2)*0.18, fy:0.5,
+                A:(i&1?5000:-5000), B:0, r2:9000});
+      return a; }},
+  // ---- the current, eased like the rest ----
   {name:'current', voice:"“Writing has to be liquid or gaseous simply because normal perception is solid.”",
-    build:()=>{ sources.length=0; globalFlow.x=34*1.4; globalFlow.y=0; }},
+    make:()=>[{lane:true, dirx:1, diry:0, nx:0, ny:1, freq:0, phase:0, speed:48}]},
+  // ---- the dyad: the Pair, but the two between-vortices ORBIT each other ----
+  {name:'dyad', voice:"“We were never going to touch. We needed a between, and the between moves.”",
+    make:()=>[{fx:0.5, fy:0.5, A:0, B:9000, r2:34000, orbit:{rx:0.16, ry:0.12, ph:0, sp:0.0003}},
+              {fx:0.5, fy:0.5, A:0, B:-9000, r2:34000, orbit:{rx:0.16, ry:0.12, ph:Math.PI, sp:0.0003}}]},
+  // ---- body without organs: a held, trembling plane that resists organisation ----
+  {name:'bwo', voice:"“Make yourself a body without organs. Not the absence of organs — their uncertain presence.”",
+    make:()=>[{fx:0.5, fy:0.5, A:-1400, B:0, r2:60000},
+              {fx:0.5, fy:0.5, A:0, B:0, r2:14000, shiver:true}]},
   {name:'weather', voice:"“What you made, the air is wearing now. The line becomes weather.”",
-    build:()=>{ sources.length=0; globalFlow.x=0; globalFlow.y=0;
-                sources.push({x:vw(0.5), y:vh(0.5), A:0, B:0, r2:10000, shiver:true});
-                sources.push({x:vw(0.32), y:vh(0.42), A:0, B:6000, r2:32400}); }},
+    make:()=>[{fx:0.5, fy:0.5, A:0, B:0, r2:10000, shiver:true},
+              {fx:0.32, fy:0.42, A:0, B:6000, r2:32400}]},
 ];
 let beat=0;
+// blend ease rate: ~1.2s to cross. Tied to dt in stepBeat.
+const BEAT_EASE=0.0016;
+// fieldT advances at FIELD_RATE per ms (see frame()), so 1 fieldT-unit ≈ 5.56s.
+// orbit `sp` is given in revolutions-per-fieldT-unit; this converts to radians.
+const FIELD_RATE=0.00018;
+const ORBIT_TO_RAD=TAU/FIELD_RATE;
 function setBeat(i){
   beat=(i+beats.length)%beats.length;
-  beats[beat].build();
+  // fade out every current beat-source (events have no .bl and are left alone)
+  for(let k=0;k<sources.length;k++) if(sources[k].bl!==undefined) sources[k].blT=0;
+  // add this beat's sources, rising from nothing
+  const made=beats[beat].make();
+  for(let k=0;k<made.length;k++){
+    const s=made[k];
+    s.bl=0; s.blT=1;
+    s.t0=fieldT;                          // phase reference for orbit motion
+    if(s.fx!==undefined){ s.x=vw(s.fx); s.y=vh(s.fy); }  // initial world placement
+    sources.push(s);
+  }
   sayNow(beats[beat].voice);   // speak the beat as you enter it
+}
+// ease blends, re-centre screen-fraction sources, and animate orbiting ones.
+// Cheap: runs over the few beat-sources once per frame, never per particle.
+function stepBeat(dt){
+  for(let k=sources.length-1;k>=0;k--){
+    const s=sources[k];
+    if(s.bl===undefined) continue;                  // an event — skip
+    s.bl += (s.blT-s.bl)*Math.min(1,dt*BEAT_EASE);
+    if(s.blT===0 && s.bl<0.01){ sources.splice(k,1); continue; }  // fully faded → cull
+    if(s.fx!==undefined){                           // re-centre on current camera
+      let cx=vw(s.fx), cy=vh(s.fy);
+      if(s.orbit){                                  // living source: orbit its anchor
+        const o=s.orbit, ang=o.ph+(fieldT-s.t0)*o.sp*ORBIT_TO_RAD;
+        cx += Math.cos(ang)*o.rx*W; cy += Math.sin(ang)*o.ry*H;
+      }
+      s.x=cx; s.y=cy;
+    }
+  }
 }
 
 /* ---- events: things the world DOES on its own ----
@@ -727,29 +907,56 @@ const script = shuffle([
   "You found out you could move.",
   "I always knew you’d find out.",
 ]);
+/* ---- text→ink tuning, in one place ----
+   The text lifecycle used to be a scatter of magic numbers across glyphPoints,
+   spawnTextInk, stepInk and speak. Gathering them here makes the voice tunable
+   as a whole — and lets a beat (later) bend the whole register at once. */
+const TEXT = {
+  scale: 2,            // offscreen raster supersample (glyph fidelity)
+  canvasH: 2.0,        // canvas height as a multiple of fontPx (room for ascenders/descenders)
+  scanStep: 2,         // pixel scan stride; smaller = denser glyphs, more particles
+  alphaCut: 100,       // covered-pixel alpha threshold
+  spring: 0.22,        // home-spring constant while held (× (1-release) × txt)
+  damping: 0.78,       // velocity damping while held (lerped by txt)
+  holdHi: 0.75,        // f at which the hold has fully released
+  holdSpan: 0.35,      // f-window over which txt decays 1→0 (ends at holdHi)
+  lifeBase: 9000,      // base on-screen life (ms) before length scaling
+  lifePerChar: 130,    // extra ms per character — long aphorisms linger
+  lifeMax: 22000,      // ceiling so nothing overstays
+};
 // offscreen rasteriser, reused
 const gcv=document.createElement('canvas'), gctx=gcv.getContext('2d');
 // Rasterise a line to a small offscreen canvas and scan covered pixels → glyph
 // points. Cached by text so a repeated line never re-rasterises (the getImageData
 // readback is the costliest single op here). Scale 2× + step 2 keeps glyph
 // fidelity while cutting the readback+scan area ~4× vs the old 3× / step-3.
+// The point list is SHUFFLED once at build time so the deferred drain fills the
+// whole word at once — the line *precipitates* (condenses out of the white)
+// rather than wiping in left-to-right. The shuffle is one-time and cached, so it
+// costs nothing per frame.
 const glyphCache = new Map();
 function glyphPoints(text, fontPx){
   const key = text+'@'+(fontPx|0);
   const hit = glyphCache.get(key);
   if(hit) return hit;
-  const scale = 2;
+  const scale = TEXT.scale;
   const scaledFontPx = fontPx * scale;
   const font='400 '+scaledFontPx+'px Georgia, "EB Garamond", "Times New Roman", serif';
   gctx.font=font;
-  const w=Math.ceil(gctx.measureText(text).width)+12*scale, h=Math.ceil(scaledFontPx*2.0);
+  const w=Math.ceil(gctx.measureText(text).width)+12*scale, h=Math.ceil(scaledFontPx*TEXT.canvasH);
   gcv.width=w; gcv.height=h;
   gctx.font=font; gctx.textBaseline='middle'; gctx.fillStyle='#000';
   gctx.clearRect(0,0,w,h); gctx.fillText(text,6*scale,h*0.5);
   const data=gctx.getImageData(0,0,w,h).data, pts=[];
-  const step=2;
+  const step=TEXT.scanStep;
   for(let y=0;y<h;y+=step) for(let x=0;x<w;x+=step){
-    if(data[(y*w+x)*4+3]>100) pts.push((x-w*0.5)/scale, (y-h*0.5)/scale);
+    if(data[(y*w+x)*4+3]>TEXT.alphaCut) pts.push((x-w*0.5)/scale, (y-h*0.5)/scale);
+  }
+  // shuffle the (x,y) PAIRS so the drain order is spatially scattered — Fisher-
+  // Yates over pair-indices, swapping both coords together.
+  for(let i=pts.length/2-1;i>0;i--){
+    const j=(Math.random()*(i+1))|0, a=i*2, b=j*2;
+    const tx=pts[a], ty=pts[a+1]; pts[a]=pts[b]; pts[a+1]=pts[b+1]; pts[b]=tx; pts[b+1]=ty;
   }
   const res={pts, w: w/scale, h: h/scale};
   if(glyphCache.size>64) glyphCache.clear();   // bound the cache
@@ -782,15 +989,20 @@ function speak(text, now){
   const cell=emptiestCell();               // screen-space placement
   const sx=Math.max(g.w*0.5+10, Math.min(W-g.w*0.5-10, cell.x));
   const sy=Math.max(g.h*0.5+10, Math.min(H-g.h*0.5-10, cell.y));
+  const life=spawnLifeFor(text);
   // remember this placement so the next few lines steer clear (overlap guard)
-  recentLines.push({sx, sy, until: now+spawnLifeFor()});
+  recentLines.push({sx, sy, until: now+life});
   // screen centre → world centre; glyph offsets divided by zoom at spawn time
   spawnCx=screenToWorldX(sx); spawnCy=screenToWorldY(sy); spawnInvZoom=1/cam.zoom;
-  spawnPts=g.pts; spawnLife=spawnLifeFor(); spawnIdx=0;
+  spawnPts=g.pts; spawnLife=life; spawnIdx=0;
   lastAdvance=now; voiceBusyUntil=now+spawnLife;
   jitterSeed+=1.7;
 }
-function spawnLifeFor(){ return 16000; }
+// On-screen life scales with line length: a short line passes, a long aphorism
+// lingers long enough to be read. Clamped so nothing overstays its welcome.
+function spawnLifeFor(text){
+  return Math.min(TEXT.lifeMax, TEXT.lifeBase + (text?text.length:0)*TEXT.lifePerChar);
+}
 // Pre-rasterise every beat voice into the glyph cache at startup, so the first
 // CLICK on a beat never pays the synchronous getImageData readback (the costliest
 // op here, and the cause of the click hitch). Run once after resize() so fontPx
@@ -959,9 +1171,9 @@ function frame(now){
   stepTheme(dt);
   stepCam(dt);
   INK = inkColor();
-  fieldT += dt*0.00018;
+  fieldT += dt*FIELD_RATE;
   bakeField();
-  while(acc>=STEP){ stepDot(STEP); stepEvents(STEP); stepInk(STEP); acc-=STEP; }
+  while(acc>=STEP){ stepDot(STEP); stepBeat(STEP); stepEvents(STEP); stepInk(STEP); acc-=STEP; }
   maybeEvent(dt);
   drainSpawnQueue();   // bleed out queued text particles: ~10 frames, no spike
   advanceVoice(now);   // builds the occupancy grid lazily, only when placing a line
