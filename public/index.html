@@ -782,12 +782,19 @@ function setBeat(i){
 }
 // ease blends, re-centre screen-fraction sources, and animate orbiting ones.
 // Cheap: runs over the few beat-sources once per frame, never per particle.
+// Also reports whether the FIELD is still changing on its own — a blend mid-ease
+// or an orbiting source means the baked grid must refresh every frame (see the
+// bake gate in frame()). A fully-settled, static beat lets the bake skip frames.
+let fieldDynamic=false;
 function stepBeat(dt){
+  fieldDynamic=false;
   for(let k=sources.length-1;k>=0;k--){
     const s=sources[k];
     if(s.bl===undefined) continue;                  // an event — skip
     s.bl += (s.blT-s.bl)*Math.min(1,dt*BEAT_EASE);
     if(s.blT===0 && s.bl<0.01){ sources.splice(k,1); continue; }  // fully faded → cull
+    if(Math.abs(s.bl-s.blT)>0.002) fieldDynamic=true;   // still crossfading
+    if(s.orbit) fieldDynamic=true;                       // a living, moving source
     if(s.fx!==undefined){                           // re-centre on current camera
       let cx=vw(s.fx), cy=vh(s.fy);
       if(s.orbit){                                  // living source: orbit its anchor
@@ -1352,16 +1359,27 @@ function stepDot(dt){
   const n=Math.floor(shedRemainder); shedRemainder-=n;
   if(n>0) shed(dot.x,dot.y, Math.min(n,12), dot.vx, dot.vy, dot.px, dot.py);
 }
+let frameTick=0;
 function frame(now){
   if(!last) last=now;
   let dt=now-last; last=now; if(dt>50) dt=50;
   acc+=dt;
   const STEP=16.67;
   stepTheme(dt);
-  stepCam(dt);
+  const camMoved=stepCam(dt);
   INK = inkColor();
   fieldT += dt*FIELD_RATE;
-  bakeField();
+  // Temporal bake gate. The baked field is what every particle reads; re-baking
+  // it is the largest per-frame cost. But when the world is STATIC — camera still,
+  // no beat crossfading, no orbiting/living sources, no transient events — the
+  // grid changes only by fieldT's glacial drift (~0.003 units/frame), which is
+  // invisible. So in that case we bake every OTHER frame and simply reuse last
+  // frame's grid between (no lerp needed — the drift is below perception). Any
+  // motion forces a fresh bake, so responsiveness is untouched. Halves bake cost
+  // during the quiet, contemplative stretches the piece spends most of its time in.
+  const ft=frameTick++;
+  const needBake = camMoved || fieldDynamic || events.length>0 || (ft&1)===0;
+  if(needBake) bakeField();
   while(acc>=STEP){ stepDot(STEP); stepBeat(STEP); stepEvents(STEP); stepInk(STEP); acc-=STEP; }
   maybeEvent(dt);
   drainPrewarm();      // warm one beat-voice glyph per frame (behind the boot veil)
