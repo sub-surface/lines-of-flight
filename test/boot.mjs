@@ -66,10 +66,15 @@ function fireClick(){ (listeners.click||[]).forEach(f=>f({})); }
   ok(maxErr<0.03, `lutSin within tolerance of Math.sin (maxErr=${maxErr.toFixed(4)})`);
 }
 
-// prewarm should have populated the glyph cache with every beat voice at boot,
-// BEFORE any click — this is the fix for the click-lag (no cold getImageData on
-// click). There are 8 distinct beat voices; one cache entry per line.
-ok(sandbox.__probe().glyphCacheSize>=8, `voices prewarmed at boot (cache=${sandbox.__probe().glyphCacheSize})`);
+// Prewarm populates the glyph cache with every beat voice — the fix for the
+// click-lag (no cold getImageData on click). It now drains ONE voice per frame
+// behind the boot veil (rather than a ~170ms synchronous burst at boot), so it
+// is warm within the first ~14 frames, well before the veil lifts. Pump a short
+// warm-up burst, then assert the cache filled. There are 14 beat voices.
+const bootCacheBefore = sandbox.__probe().glyphCacheSize;
+for(let i=0;i<20;i++){ nowMs+=16.7; if(rafCb){ const cb=rafCb; rafCb=null; cb(nowMs); } }
+ok(sandbox.__probe().glyphCacheSize>=8,
+   `voices prewarmed behind veil (before=${bootCacheBefore}, after 20 frames=${sandbox.__probe().glyphCacheSize})`);
 
 let maxCount=0;
 for(let frame=0; frame<600; frame++){

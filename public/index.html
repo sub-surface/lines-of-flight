@@ -241,12 +241,73 @@ function evalSources(x,y,t){
       vy += s.diry * s.speed * g * bl;
       continue;
     }
+    if(s.cell){
+      // ---- cellular grid: a lattice of counter-rotating gyres ----
+      // Curl of the stream function ψ = cos(kx)·cos(ky):
+      //   v = (∂ψ/∂y, −∂ψ/∂x) = (−k·cos(kx)·sin(ky),  k·sin(kx)·cos(ky)).
+      // Divergence-free, so the cells are closed boxes (ink circulates within
+      // each, neighbours spin opposite) — reads unmistakably as a GRID, not the
+      // diagonal stripes two summed lanes give. All trig via the LUT; baked, so
+      // the 4 lookups per node are cheap. `phase` (LUT_BIAS) keeps args positive.
+      const k=s.freq, ph=s.phase;
+      // optional slow horizontal wobble of the cell boundaries → the oscillating
+      // "double-gyre" of geophysical fluid dynamics. wob=0 → a static lattice.
+      const xph = s.wob ? x*k+ph + s.wob*lutSin(t*s.wobT+LANE_BIAS) : x*k+ph;
+      const ckx=lutCos(xph), skx=lutSin(xph);
+      const cky=lutCos(y*k+ph), sky=lutSin(y*k+ph);
+      vx += -s.speed * ckx * sky * bl;
+      vy +=  s.speed * skx * cky * bl;
+      continue;
+    }
+    if(s.attractor){
+      // ---- strange attractor as a flow field (de Jong / Clifford family) ----
+      // The defining ODE of a chaotic attractor, used DIRECTLY as the velocity:
+      //   vx = sin(a·Y) − c·cos(b·X),  vy = sin(c2·X) − d·cos(d2·Y)
+      // where X,Y are the world point scaled to the attractor's natural size.
+      // Ink follows the trajectories → the iconic filamentary, smoke-and-lace
+      // chaos of dynamical systems. Pure LUT trig (4 lookups), fully bakeable.
+      // Each (a,b,c2,d2) is a different creature, so one primitive → many beats.
+      // de Jong: x' = sin(a·Y) − cos(b·X),  y' = sin(c·X) − cos(d·Y)
+      const X=(x-s.x)*s.scale, Y=(y-s.y)*s.scale, pa=s.pa;
+      const ax = lutSin(s.a*Y + pa) - lutCos(s.b*X + pa);
+      const ay = lutSin(s.c*X + pa) - lutCos(s.d*Y + pa);
+      vx += ax * s.speed * bl;
+      vy += ay * s.speed * bl;
+      continue;
+    }
+    if(s.fbm){
+      // ---- fractional-Brownian curl: turbulence with eddies-within-eddies ----
+      // The base curl is octave 1; here we add ONE higher-frequency octave for
+      // the geological, weather-like quality. Crucially this uses the ANALYTIC
+      // curl (closed form of the sine noise — see curlBase), not a 4-call finite
+      // difference: 6 LUT-able trig instead of 16, ~3× cheaper, and it stays a
+      // bakeable per-node cost. fr scales the spatial frequencies of the octave.
+      const amp=s.amp||14, fr=2.3;
+      const aF=NA*fr, bF=NB*fr, cF=NC*fr, dF=ND*fr;
+      const X=x*aF+t*NFT, Y=y*bF-t*NGT, P=(x+y)*cF-t*NHT, Q=(x-y)*dF+t*NIT;
+      const sX=Math.sin(X), sY=Math.sin(Y), cX=Math.cos(X), cY=Math.cos(Y);
+      const cP=Math.cos(P), sQ=Math.sin(Q);
+      const dndy = -sX*sY*bF + 0.5*cP*cF + 0.5*sQ*dF;
+      const dndx =  cX*aF*cY + 0.5*cP*cF - 0.5*sQ*dF;
+      vx += dndy*amp*bl;  vy += -dndx*amp*bl;
+      continue;
+    }
     const dx=x-s.x, dy=y-s.y;
     const d2=dx*dx+dy*dy;
+    if(s.rankine){
+      // ---- Rankine vortex: a real whirlpool/tornado profile ----
+      // Solid-body rotation inside the core (v ∝ r, no singularity at centre),
+      // irrotational 1/r swirl outside. One branch on the squared core radius —
+      // no sqrt. B sets the circulation; rc2 the core size.
+      const B=(s.currB!==undefined?s.currB:s.B)*bl;
+      if(d2 < s.rc2){ const inv=1/s.rc2; vx += B*dy*inv; vy += -B*dx*inv; }
+      else          { const inv=1/d2;    vx += B*dy*inv; vy += -B*dx*inv; }
+      continue;
+    }
     const denom=1/(d2+s.r2); // single reciprocal, zero square roots!
 
     if(s.shiver){
-      const sh=30*denom*s.r2*bl;
+      const sh=(s.shiverAmp||30)*denom*s.r2*bl;
       vx += (noise2(x*9,y*9,t*7))*sh;
       vy += (noise2(y*9,x*9,t*7))*sh;
     } else {
@@ -351,6 +412,9 @@ function bakeField(){
   }
 }
 // bilinear sample at a WORLD point → writes ofx/ofy (shared out-vector).
+// NOTE: stepInk's hot loop inlines this (see "inlined sampleField") to drop the
+// per-particle call overhead; this stays as the readable reference and for any
+// non-hot-path caller.
 function sampleField(x,y){
   const zInvCell = cam.zoom*INV_FCELL;
   let gx=(x-cam.x)*zInvCell+0.5, gy=(y-cam.y)*zInvCell+0.5;
@@ -414,14 +478,27 @@ for(let i=0;i<SIN_SIZE;i++) sinTable[i]=Math.sin(i/SIN_SCALE);
 // after a |0 — JS bitwise wraps two's-complement, and seeds/phase are ≥0 here
 // anyway, so the index is always in range.
 function lutSin(x){ return sinTable[(x*SIN_SCALE)&SIN_MASK]; }
+// cos(x)=sin(x+π/2): same table, shifted a quarter-period (64 entries of 256).
+function lutCos(x){ return sinTable[((x*SIN_SCALE)+64|0)&SIN_MASK]; }
 
-function shed(x,y, n, vx, vy){
+// Shed n ink particles. If a start point (x0,y0) is given, distribute them ALONG
+// the segment (x0,y0)→(x,y) the dot just travelled this step, rather than piling
+// them at the endpoint. This keeps the trail continuous no matter how far the dot
+// jumped in one step — which matters now that the dot tracks the cursor tightly
+// (DOT_TRACK), and also makes the line robust to a fast flick or a low framerate.
+function shed(x,y, n, vx, vy, x0, y0){
+  const lerp = x0!==undefined;
+  const dxs = lerp ? x-x0 : 0, dys = lerp ? y-y0 : 0;
   for(let i=0;i<n;i++){
     if(count>=MAXINK) break;
     const a=Math.random()*6.283, r=Math.random()*4;
     const life=8000+Math.random()*12000; // 8s–20s tail life
     const mass=0.55+Math.random()*Math.random()*1.9;   // skew small: many fine, few fat
-    const sx=x+Math.cos(a)*r, sy=y+Math.sin(a)*r;
+    // base point: stepped along the path (jittered so the spacing isn't a grid),
+    // then the existing radial scatter on top.
+    const tt = lerp ? (i+Math.random())/n : 0;
+    const bx = lerp ? x0+dxs*tt : x, by = lerp ? y0+dys*tt : y;
+    const sx=bx+Math.cos(a)*r, sy=by+Math.sin(a)*r;
     const k=count++;
     x_[k]=px_[k]=sx; y_[k]=py_[k]=sy;
     vx_[k]=(vx||0)*0.3+(Math.random()-0.5)*0.6;
@@ -448,6 +525,13 @@ function stepInk(dt){
   const sub=dt*0.06;
   const n=count;
   const parity=stepTick++&1;
+  // Hoist the camera/grid constants the field-sample reads every particle. As
+  // `cam.*` property reads and module globals they aren't reliably treated as
+  // loop-invariant by the JIT; lifting them to locals lets the sample inline as
+  // pure array math. (Bake-then-step means cam is fixed for the whole loop.)
+  const camX=cam.x, camY=cam.y, zInvCell=cam.zoom*INV_FCELL;
+  const cols=FCOLS, gxMax=FCOLS-1.001, gyMax=FROWS-1.001;
+  const FVX=fvx, FVY=fvy;
   for(let k=0;k<n;k++){
     const age=age_[k]+dt; age_[k]=age;
     const f=age*invLife_[k];
@@ -457,7 +541,16 @@ function stepInk(dt){
     // responsive "matter" feel is untouched — the saving comes from the old
     // drifting majority where a one-step-stale weather vector is invisible.
     if(txtInit_[k] || age<1200 || (k&1)===parity){
-      sampleField(x_[k],y_[k]);       // writes ofx/ofy
+      // inlined sampleField — bilinear read of the baked grid, no call overhead
+      let gx=(x_[k]-camX)*zInvCell+0.5, gy=(y_[k]-camY)*zInvCell+0.5;
+      if(gx<0)gx=0; else if(gx>gxMax)gx=gxMax;
+      if(gy<0)gy=0; else if(gy>gyMax)gy=gyMax;
+      const gi=gx|0, gj=gy|0, fx=gx-gi, fy=gy-gj;
+      const o=gj*cols+gi, o2=o+cols;
+      const txa=FVX[o]+(FVX[o+1]-FVX[o])*fx, txb=FVX[o2]+(FVX[o2+1]-FVX[o2])*fx;
+      ofx=txa+(txb-txa)*fy;
+      const tya=FVY[o]+(FVY[o+1]-FVY[o])*fx, tyb=FVY[o2]+(FVY[o2+1]-FVY[o2])*fx;
+      ofy=tya+(tyb-tya)*fy;
       ofx_[k]=ofx; ofy_[k]=ofy;        // cache for the skipped steps
     } else {
       ofx=ofx_[k]; ofy=ofy_[k];        // reuse last good sample
@@ -547,7 +640,7 @@ const beats = [
   {name:'well', voice:"“To flee is not to renounce action; there is nothing more active than a flight.”",
     make:()=>[{fx:0.5, fy:0.5, A:-8000, B:0, r2:12100}]},
   {name:'stone', voice:"“Lodge yourself on a stratum, experiment with the opportunities it offers, finding possible lines of flight.”",
-    make:()=>[{fx:0.5, fy:0.5, A:12000, B:0, r2:22500}]},
+    make:()=>[{fx:0.5, fy:0.5, A:6000, B:0, r2:22500}]},   // gentler repel — pushes, doesn't scatter
   {name:'orbit', voice:"“The self is only a threshold, a door, a becoming between two multiplicities.”",
     make:()=>[{fx:0.5, fy:0.5, A:-2500, B:9000, r2:22500}]},
   {name:'vortex', voice:"“To become imperceptible, to make a line, to find your line of flight.”",
@@ -558,41 +651,104 @@ const beats = [
   // ---- striated space: ruled directional channels ----
   {name:'striated', voice:"“Striated space: the requirement of long-distance vision, the constancy of orientation.”",
     make:()=>[{lane:true, dirx:0, diry:1, nx:1, ny:0, freq:0.010, phase:LANE_BIAS, speed:30}]},
-  // ---- full striation: a crossed lattice the ink must thread ----
+  // ---- grid (cells): a lattice of counter-rotating gyres — a real grid, not
+  //      stripes. The cellular primitive gives closed boxes ink circulates in. ----
   {name:'grid', voice:"“To striate, to grid, to make the smooth space measurable.”",
-    make:()=>[{lane:true, dirx:0, diry:1, nx:1, ny:0, freq:0.011, phase:LANE_BIAS, speed:24},
-              {lane:true, dirx:1, diry:0, nx:0, ny:1, freq:0.011, phase:LANE_BIAS, speed:24}]},
-  // ---- murmuration: a loose swarm of tiny swirls, slowly orbiting — no center ----
+    make:()=>[{cell:true, freq:0.013, phase:LANE_BIAS, speed:30}]},
+  // ---- grid (nodes): a 4×3 array of gentle wells; ink pools at lattice points,
+  //      thins between. Striation read as "rooted points", the measured plane. ----
+  {name:'lattice', voice:"“The State-form: a grid of fixed points, and the distances between them made equal.”",
+    make:()=>{ const a=[]; const CX=4, CY=3;
+      for(let iy=0;iy<CY;iy++) for(let ix=0;ix<CX;ix++)
+        a.push({fx:0.18+ix*0.21, fy:0.25+iy*0.25, A:-2600, B:0, r2:6400});
+      return a; }},
+  // ---- murmuration: a loose swarm of tiny swirls, slowly orbiting — no center.
+  //      Calmed: weaker swirls (±3200) and a slower orbit so it drifts, not churns. ----
   {name:'murmuration', voice:"“A loose scatter that drifts as one. No center, and going somewhere.”",
     make:()=>{ const a=[]; const N=6;
       for(let i=0;i<N;i++){ const ph=i/N*TAU;
-        a.push({fx:0.5, fy:0.5, A:0, B:(i&1?5200:-5200), r2:9000,
-                orbit:{rx:0.22, ry:0.16, ph, sp:0.00018+0.00003*i}}); }
+        a.push({fx:0.5, fy:0.5, A:0, B:(i&1?3200:-3200), r2:9000,
+                orbit:{rx:0.22, ry:0.16, ph, sp:0.00012+0.00002*i}}); }
       return a; }},
-  // ---- chain: alternating beads in a row — the rhizome's "and… and… and" ----
+  // ---- chain: alternating beads — the rhizome's "and… and… and". Calmed: net
+  //      inward (+4000 sink / −2500 mild source) so the beads gather, not scatter. ----
   {name:'chain', voice:"“And… and… and. The rhizome is woven of conjunctions.”",
     make:()=>{ const a=[]; const N=4;
       for(let i=0;i<N;i++) a.push({fx:0.5 + (i-(N-1)/2)*0.18, fy:0.5,
-                A:(i&1?5000:-5000), B:0, r2:9000});
+                A:(i&1?-2500:-4000), B:0, r2:9000});
       return a; }},
   // ---- the current, eased like the rest ----
   {name:'current', voice:"“Writing has to be liquid or gaseous simply because normal perception is solid.”",
     make:()=>[{lane:true, dirx:1, diry:0, nx:0, ny:1, freq:0, phase:0, speed:48}]},
+  // ---- channel / river: one wide attractive lane that catches ink and carries
+  //      it in a single coherent stream. The gentle guided flow. ----
+  {name:'channel', voice:"“A river borrows its bed; it is the flow that makes the banks.”",
+    make:()=>[{lane:true, dirx:1, diry:0, nx:0, ny:1, freq:0.0042, phase:LANE_BIAS, speed:40},
+              {fx:0.5, fy:0.5, A:-1800, B:0, r2:90000}]},   // a soft pull onto the stream
+  // ---- shear / fold: two opposing drifts meeting at the mid-line; ink stretches
+  //      and folds along the seam (the Deleuzian fold). ----
+  {name:'fold', voice:"“Always a fold within a fold, like a cavern within a cavern.”",
+    make:()=>[{lane:true, dirx:1, diry:0, nx:0, ny:1, freq:0.006, phase:LANE_BIAS, speed:34}]},
   // ---- the dyad: the Pair, but the two between-vortices ORBIT each other ----
   {name:'dyad', voice:"“We were never going to touch. We needed a between, and the between moves.”",
     make:()=>[{fx:0.5, fy:0.5, A:0, B:9000, r2:34000, orbit:{rx:0.16, ry:0.12, ph:0, sp:0.0003}},
               {fx:0.5, fy:0.5, A:0, B:-9000, r2:34000, orbit:{rx:0.16, ry:0.12, ph:Math.PI, sp:0.0003}}]},
-  // ---- body without organs: a held, trembling plane that resists organisation ----
+  // ---- spiral galaxy: a strong central sink with rotation tuned so ink spirals
+  //      INWARD in arms rather than merely orbiting — coherent, not chaotic. ----
+  {name:'spiral', voice:"“To find your line of flight is to spiral inward toward what you are becoming.”",
+    make:()=>[{fx:0.5, fy:0.5, A:-5200, B:7000, r2:30000}]},
+
+  /* ===== fields from nature: chaos, attractors, real flows =====
+     All bake into the grid (a few hundred node evals) — none cost per-particle.
+     The strange attractors share ONE primitive (s.attractor); each (a,b,c2,d2)
+     is a different creature. `scale` sizes the pattern to the screen; speed sets
+     flow strength; pa is the LUT positive-bias phase. */
+  // ---- de Jong I — broad filamentary chaos, the classic "smoke and lace" ----
+  {name:'attractor', voice:"“Chaos is not disorder; it is an order we have not yet learned to read.”",
+    make:()=>[{attractor:true, fx:0.5, fy:0.5, scale:0.0036, speed:26,
+               a:1.97, b:-1.7, c:1.3, d:1.86, pa:LANE_BIAS}]},
+  // ---- de Jong II — tighter, more vortical knots ----
+  {name:'attractor-knot', voice:"“A thousand tiny turnings, and no two the same.”",
+    make:()=>[{attractor:true, fx:0.5, fy:0.5, scale:0.0030, speed:24,
+               a:-2.0, b:-2.0, c:-1.2, d:2.0, pa:LANE_BIAS}]},
+  // ---- Clifford-ish — sweeping arcs that fold back on themselves ----
+  {name:'attractor-arc', voice:"“The line does not go from here to there; it sweeps, and folds, and returns changed.”",
+    make:()=>[{attractor:true, fx:0.5, fy:0.5, scale:0.0042, speed:20,
+               a:1.6, b:-1.9, c:1.8, d:-1.4, pa:LANE_BIAS}]},
+  // ---- double-gyre: two counter-rotating cells that slowly oscillate sideways
+  //      (the textbook oscillating flow of oceanography). Calm, periodic. ----
+  {name:'double-gyre', voice:"“Two breaths, in turn: the sea leans one way, then the other.”",
+    make:()=>[{cell:true, freq:0.009, phase:LANE_BIAS, speed:30, wob:1.1, wobT:0.4}]},
+  // ---- von Kármán vortex street: the alternating eddies shed behind an
+  //      obstacle (the trail you see in clouds behind an island), drifting downstream. ----
+  {name:'vortex-street', voice:"“In the wake of the rock, the water remembers it in turning.”",
+    make:()=>{ const a=[{lane:true, dirx:1, diry:0, nx:0, ny:1, freq:0, phase:0, speed:20}];
+      const N=5;
+      for(let i=0;i<N;i++) a.push({fx:0.16+i*0.17, fy:i&1?0.40:0.60,
+               rankine:true, B:(i&1?-4200:4200), rc2:5000, r2:0});
+      return a; }},
+  // ---- fBm turbulence: eddies within eddies — a geological, weather-like flow.
+  //      The base curl is one octave; this adds two more (the SPEC's direction). ----
+  {name:'turbulence', voice:"“The forces of chaos, turned into something — weather.”",
+    make:()=>[{fbm:true, amp:14}]},
+  // ---- the whirlpool: a Rankine vortex — solid core, irrotational skirt; the
+  //      true profile of a tornado or a drain. Coherent, hypnotic. ----
+  {name:'whirlpool', voice:"“Down, and around, and held at the still centre of the turning.”",
+    make:()=>[{fx:0.5, fy:0.5, rankine:true, B:11000, rc2:14000, r2:0},
+              {fx:0.5, fy:0.5, A:-1600, B:0, r2:40000}]},   // gentle inward draw
+  // ---- body without organs: a held, trembling plane that resists organisation.
+  //      Calmed: shiver amplitude pulled down so it trembles rather than thrashes. ----
   {name:'bwo', voice:"“Make yourself a body without organs. Not the absence of organs — their uncertain presence.”",
     make:()=>[{fx:0.5, fy:0.5, A:-1400, B:0, r2:60000},
-              {fx:0.5, fy:0.5, A:0, B:0, r2:14000, shiver:true}]},
+              {fx:0.5, fy:0.5, A:0, B:0, r2:14000, shiver:true, shiverAmp:18}]},
   {name:'weather', voice:"“What you made, the air is wearing now. The line becomes weather.”",
-    make:()=>[{fx:0.5, fy:0.5, A:0, B:0, r2:10000, shiver:true},
+    make:()=>[{fx:0.5, fy:0.5, A:0, B:0, r2:10000, shiver:true, shiverAmp:16},
               {fx:0.32, fy:0.42, A:0, B:6000, r2:32400}]},
 ];
 let beat=0;
-// blend ease rate: ~1.2s to cross. Tied to dt in stepBeat.
-const BEAT_EASE=0.0016;
+// blend ease rate: ~2.5s to cross — a slow, contemplative dissolve between states
+// rather than a quick shift. Tied to dt in stepBeat.
+const BEAT_EASE=0.00075;
 // fieldT advances at FIELD_RATE per ms (see frame()), so 1 fieldT-unit ≈ 5.56s.
 // orbit `sp` is given in revolutions-per-fieldT-unit; this converts to radians.
 const FIELD_RATE=0.00018;
@@ -924,8 +1080,11 @@ const TEXT = {
   lifePerChar: 130,    // extra ms per character — long aphorisms linger
   lifeMax: 22000,      // ceiling so nothing overstays
 };
-// offscreen rasteriser, reused
-const gcv=document.createElement('canvas'), gctx=gcv.getContext('2d');
+// offscreen rasteriser, reused. willReadFrequently keeps it CPU-side: glyphPoints
+// reads it back with getImageData every uncached line, and on a GPU-backed canvas
+// each readback is a slow device→host copy (the browser warns about exactly this).
+// The flag was the bulk of prewarmVoices' ~170ms startup stall.
+const gcv=document.createElement('canvas'), gctx=gcv.getContext('2d',{willReadFrequently:true});
 // Rasterise a line to a small offscreen canvas and scan covered pixels → glyph
 // points. Cached by text so a repeated line never re-rasterises (the getImageData
 // readback is the costliest single op here). Scale 2× + step 2 keeps glyph
@@ -1003,13 +1162,22 @@ function speak(text, now){
 function spawnLifeFor(text){
   return Math.min(TEXT.lifeMax, TEXT.lifeBase + (text?text.length:0)*TEXT.lifePerChar);
 }
-// Pre-rasterise every beat voice into the glyph cache at startup, so the first
-// CLICK on a beat never pays the synchronous getImageData readback (the costliest
-// op here, and the cause of the click hitch). Run once after resize() so fontPx
-// matches W. Beat lines are few (9) and the cache holds 64, so they never evict.
-function prewarmVoices(){
+// Pre-rasterise every beat voice into the glyph cache so the first CLICK on a
+// beat never pays the synchronous getImageData readback (the costliest op here,
+// and the cause of the click hitch). With 14 beats this is ~170ms if done in one
+// synchronous burst at boot — a hard stall before first paint. Instead we drain
+// it ONE voice per frame from the main loop, behind the boot veil: the warm-up
+// finishes within the first ~14 frames (well under the veil's dwell) with no
+// single-frame spike. willReadFrequently (see gctx) already cut the per-call cost.
+let prewarmQueue=null, prewarmIdx=0;
+function prewarmVoices(){      // now just ARMS the queue; draining happens per-frame
+  prewarmQueue=beats.filter(b=>b.voice).map(b=>b.voice);
+  prewarmIdx=0;
+}
+function drainPrewarm(){
+  if(!prewarmQueue || prewarmIdx>=prewarmQueue.length){ prewarmQueue=null; return; }
   const fontPx=Math.max(14, Math.min(20, W*0.015));
-  for(let i=0;i<beats.length;i++){ if(beats[i].voice) glyphPoints(beats[i].voice, fontPx); }
+  glyphPoints(prewarmQueue[prewarmIdx++], fontPx);   // one readback per frame
 }
 // say a specific line NOW (beat entry, event word), but still honour the
 // no-repeat window: if this exact line spoke within NO_REPEAT_MS, stay silent
@@ -1147,12 +1315,19 @@ function drawInk(){
 
 /* ---- loop ---- */
 let acc=0, last=0, shedRemainder=0;
+// How tightly the dot tracks the cursor each fixed step (stepDot runs at a fixed
+// 16.67ms substep, so this is already framerate-independent). The dot used to ease
+// at 0.22 — a heavy low-pass that left it ~3–4 frames behind a moving cursor, and
+// since ink sheds from the dot, the trail lagged the cursor visibly. We now snap
+// the dot TIGHT (0.6): the cursor feels direct, while the "weight" lives where it
+// reads better anyway — in the ink's own inertia (grip/mass) and late field-easing.
+const DOT_TRACK = 0.6;
 function stepDot(dt){
-  // the point eases toward the cursor (in world space) — your position has weight
+  // the point tracks the cursor (in world space); ink carries the inertia/weight
   const tx = mouse.inside?mouse.x:dot.x, ty = mouse.inside?mouse.y:dot.y;
   dot.px=dot.x; dot.py=dot.y;
-  dot.x += (tx-dot.x)*0.22;
-  dot.y += (ty-dot.y)*0.22;
+  dot.x += (tx-dot.x)*DOT_TRACK;
+  dot.y += (ty-dot.y)*DOT_TRACK;
   dot.vx=dot.x-dot.px; dot.vy=dot.y-dot.py;
   // shed ink in proportion to ON-SCREEN speed — world speed × zoom. This LOD is
   // what stops the particle count exploding when zoomed in: a fast world-space
@@ -1161,7 +1336,7 @@ function stepDot(dt){
   const sp=Math.sqrt(dot.vx*dot.vx+dot.vy*dot.vy)*cam.zoom;
   shedRemainder += (sp*0.5)/cam.zoom;
   const n=Math.floor(shedRemainder); shedRemainder-=n;
-  if(n>0) shed(dot.x,dot.y, Math.min(n,12), dot.vx, dot.vy);
+  if(n>0) shed(dot.x,dot.y, Math.min(n,12), dot.vx, dot.vy, dot.px, dot.py);
 }
 function frame(now){
   if(!last) last=now;
@@ -1175,6 +1350,7 @@ function frame(now){
   bakeField();
   while(acc>=STEP){ stepDot(STEP); stepBeat(STEP); stepEvents(STEP); stepInk(STEP); acc-=STEP; }
   maybeEvent(dt);
+  drainPrewarm();      // warm one beat-voice glyph per frame (behind the boot veil)
   drainSpawnQueue();   // bleed out queued text particles: ~10 frames, no spike
   advanceVoice(now);   // builds the occupancy grid lazily, only when placing a line
   // background fills the whole screen under the identity (DPR-only) transform…
