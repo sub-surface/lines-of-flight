@@ -745,6 +745,12 @@ const beats = [
     make:()=>[{fx:0.5, fy:0.5, A:0, B:0, r2:10000, shiver:true, shiverAmp:16},
               {fx:0.32, fy:0.42, A:0, B:6000, r2:32400}]},
 ];
+// Shuffle the plateaus on load — but keep `still` (index 0) as the landing, so
+// the boot veil always lifts onto the same quiet empty field. Everything after
+// it is Fisher-Yates shuffled, so the ARC through the states is different every
+// visit: there is no authored order to discover, only the one you walk. The
+// progression becomes an act of interpretation by the player, not a script.
+shuffle(beats, 1);
 let beat=0;
 // blend ease rate: ~2.5s to cross — a slow, contemplative dissolve between states
 // rather than a quick shift. Tied to dt in stepBeat.
@@ -936,7 +942,9 @@ let jitterSeed=0;   // nudged each time we place a line, so placement varies
    field carries the letters off as weather. The voice is the same matter as
    everything else — diegetic, never a UI layer. */
 // Fisher-Yates shuffle
-function shuffle(arr){ for(let i=arr.length-1;i>0;i--){ const j=(Math.random()*(i+1))|0; [arr[i],arr[j]]=[arr[j],arr[i]]; } return arr; }
+// Fisher-Yates, optionally fixing the first `start` elements in place (so e.g.
+// the beats can shuffle while keeping `still` at index 0 as the boot landing).
+function shuffle(arr, start){ start=start||0; for(let i=arr.length-1;i>start;i--){ const j=start+((Math.random()*(i+1-start))|0); [arr[i],arr[j]]=[arr[j],arr[i]]; } return arr; }
 const script = shuffle([
   // --- the world's own voice ---
   "A dot. A white that does not end.",
