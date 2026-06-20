@@ -524,7 +524,9 @@ let stepTick=0;   // advances once per stepInk call (NOT per frame — stepInk r
 function stepInk(dt){
   const sub=dt*0.06;
   const n=count;
-  const parity=stepTick++&1;
+  const tick=stepTick++;
+  const parity=tick&1;          // 2-phase: mid-age ink samples every other step
+  const phase4=tick&3;          // 4-phase: OLD ink samples every fourth step
   // Hoist the camera/grid constants the field-sample reads every particle. As
   // `cam.*` property reads and module globals they aren't reliably treated as
   // loop-invariant by the JIT; lifting them to locals lets the sample inline as
@@ -535,12 +537,16 @@ function stepInk(dt){
   for(let k=0;k<n;k++){
     const age=age_[k]+dt; age_[k]=age;
     const f=age*invLife_[k];
-    // Temporal field-sampling stagger: settled ink (text-free AND past its crisp
-    // youth) re-samples the field only on its parity step and reuses the cached
-    // vector between. Young/thrown ink and text ink always sample, so the
-    // responsive "matter" feel is untouched — the saving comes from the old
-    // drifting majority where a one-step-stale weather vector is invisible.
-    if(txtInit_[k] || age<1200 || (k&1)===parity){
+    // Temporal field-sampling stagger — the field gather is ~3/4 of stepInk's cost,
+    // so we refresh it less often the more settled the ink is. Three tiers:
+    //   • text / young (age<1200): sample EVERY step — the responsive "matter" feel.
+    //   • mid-age (<6000): sample every OTHER step (k&1==parity), reuse between.
+    //   • old (≥6000): sample every FOURTH step (k&3==phase4) — this is the big
+    //     drifting majority, where a 3-step-stale weather vector is invisible on
+    //     ink that's barely moving and fading out. Cuts the dominant gather cost.
+    const sampleNow = txtInit_[k] || age<1200
+        || (age<6000 ? (k&1)===parity : (k&3)===phase4);
+    if(sampleNow){
       // inlined sampleField — bilinear read of the baked grid, no call overhead
       let gx=(x_[k]-camX)*zInvCell+0.5, gy=(y_[k]-camY)*zInvCell+0.5;
       if(gx<0)gx=0; else if(gx>gxMax)gx=gxMax;
